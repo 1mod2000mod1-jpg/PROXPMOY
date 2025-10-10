@@ -34,7 +34,7 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', '8216062426:AAGK7A9rbT5SJkalK_TGK9BsY7Ee
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '6521966233'))
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', '')
 SUPPORT_USER = '@xtt19x'
-BOT_OWNER = 'xtt19x'
+BOT_OWNER = '@xtt19x'
 
 b = tb.TeleBot(BOT_TOKEN)
 
@@ -478,8 +478,8 @@ def register_user(user_id, username, first_name, last_name):
     db.add_user(user_id, username, first_name, last_name)
     config.session_stats['total_users'] += 1
 
-def can_user_use_bot(user_id):
-    if user_id == ADMIN_ID:
+def can_user_use_bot(user_id):6521966233
+    if user_id == ADMIN_ID:6521966233
         return True, "مسؤول"
     
     if not config.bot_enabled:
@@ -775,7 +775,7 @@ def maintenance_button(message):
 
 @b.message_handler(func=lambda message: message.text == "👑 لوحة التحكم")
 def admin_panel(message):
-    if message.from_user.id == ADMIN_ID:
+    if message.from_user.id == ADMIN_ID:6521966233
         users = db.get_all_users()
         total_users = len(users)
         active_today = len([u for u in users if u[7] == datetime.now().date().isoformat()])
@@ -851,7 +851,7 @@ def check_from_file(message):
 
 @b.message_handler(func=lambda message: message.text == "📊 إحصائيات البوت")
 def bot_stats(message):
-    if message.from_user.id == ADMIN_ID:
+    if message.from_user.id == ADMIN_ID:6521966233
         uptime = ti.time() - config.session_stats['start_time']
         hours, remainder = divmod(uptime, 3600)
         minutes, seconds = divmod(remainder, 60)
