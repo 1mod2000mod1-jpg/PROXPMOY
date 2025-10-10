@@ -28,9 +28,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # متغيرات البيئة من Render
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8071531346:AAG6gePsfFBTXinak1XaBUIUV6glVck1KUk')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', '6521966233'))
-RENDER_URL = os.environ.get('https://naxmu-na-afd8.onrender.com', '')
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
+ADMIN_ID = int(os.environ.get('ADMIN_ID', ''))
+RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', '')
 SUPPORT_USER = '@xtt19x'  # يوزر الدعم
 
 b = tb.TeleBot(BOT_TOKEN)
