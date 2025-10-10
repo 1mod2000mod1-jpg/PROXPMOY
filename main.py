@@ -775,7 +775,7 @@ def maintenance_button(message):
 
 @b.message_handler(func=lambda message: message.text == "👑 لوحة التحكم")
 def admin_panel(message):
-    if message.from_user.id == ADMIN_ID:6521966233
+    if message.from_user.id == ADMIN_ID:
         users = db.get_all_users()
         total_users = len(users)
         active_today = len([u for u in users if u[7] == datetime.now().date().isoformat()])
@@ -851,7 +851,7 @@ def check_from_file(message):
 
 @b.message_handler(func=lambda message: message.text == "📊 إحصائيات البوت")
 def bot_stats(message):
-    if message.from_user.id == ADMIN_ID:6521966233
+    if message.from_user.id == ADMIN_ID:
         uptime = ti.time() - config.session_stats['start_time']
         hours, remainder = divmod(uptime, 3600)
         minutes, seconds = divmod(remainder, 60)
