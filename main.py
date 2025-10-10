@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8216062426:AAGK7A9rbT5SJkalK_TGK9BsY7EerP-z438')
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '6521966233'))
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', '')
+SUPPORT_USER = '@xtt19x'  # يوزر الدعم
 
 b = tb.TeleBot(BOT_TOKEN)
 
@@ -76,13 +77,6 @@ PROXY_SOURCES = {
             "https://github.com/search?q=socks5+proxy+list+fresh&type=code",
             "https://github.com/search?q=http+https+proxies+updated&type=code"
         ]
-    },
-    "custom_apis": {
-        "name": "⚙️ واجهات مخصصة",
-        "enabled": True,
-        "type": "api",
-        "protocols": ["all"],
-        "sites": []  # سيتم إضافتها ديناميكياً
     }
 }
 
@@ -101,12 +95,13 @@ class ProxyBotConfig:
         self.custom_apis = []
         self.proxy_cache = {}
         self.cache_expiry = {}
+        self.bot_enabled = True  # التحكم بتشغيل/إيقاف البوت
         
         # إعدادات الفلترة المتقدمة
         self.filter_settings = {
             'country': None,
-            'protocol': 'all',  # all, http, https, socks4, socks5
-            'anonymity': 'all',  # all, transparent, anonymous, elite
+            'protocol': 'all',
+            'anonymity': 'all',
             'timeout': 10,
             'check_working': True,
             'auto_pull': True,
@@ -126,14 +121,6 @@ class ProxyBotConfig:
 
 config = ProxyBotConfig()
 
-# 🎯 واجهات برمجة مخصصة مسبقة الإعداد
-DEFAULT_CUSTOM_APIS = [
-    "https://api.proxyscrape.com/",
-    "https://proxylist.geonode.com/",
-    "https://www.proxy-list.download/",
-    "https://openproxylist.xyz/"
-]
-
 # 🎯 قوائم User-Agent للتناوب
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -143,9 +130,26 @@ USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0'
 ]
 
+# 🌐 مواقع فحص البروكسيات
+TEST_SITES = [
+    "https://httpbin.org/ip",
+    "https://api.ipify.org?format=json",
+    "https://ident.me",
+    "https://ipinfo.io/json",
+    "https://api.myip.com",
+    "https://ipapi.co/json",
+    "https://www.ipify.org",
+    "https://seeip.org",
+    "https://ipecho.net/plain",
+    "https://checkip.amazonaws.com"
+]
+
 # 🌐 Routes لـ Render.com
 @app.route('/')
 def home():
+    if not config.bot_enabled:
+        return "<h1>⛔ البوت متوقف حالياً</h1><p>يرجى التواصل مع المسؤول {}</p>".format(SUPPORT_USER)
+    
     uptime = ti.time() - config.session_stats['start_time']
     hours, remainder = divmod(uptime, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -201,6 +205,12 @@ def home():
                     border-radius: 10px;
                     text-align: center;
                 }}
+                .admin-panel {{
+                    background: rgba(255, 0, 0, 0.1);
+                    padding: 20px;
+                    border-radius: 10px;
+                    margin-top: 20px;
+                }}
             </style>
         </head>
         <body>
@@ -208,6 +218,7 @@ def home():
                 <div class="header">
                     <h1>🚀 Proxy Master Bot</h1>
                     <p>أقوى أداة سحب وفحص بروكسيات على Render.com</p>
+                    <p>📞 الدعم: {SUPPORT_USER}</p>
                 </div>
                 
                 <div class="status-cards">
@@ -232,14 +243,20 @@ def home():
                     <h3>🎯 المميزات المتاحة</h3>
                     <div class="feature-list">
                         <div class="feature">🔍 سحب ذكي</div>
-                        <div class="feature">⚡ فحص متعدد الخيوط</div>
+                        <div class="feature">⚡ فحص 10+ مواقع</div>
                         <div class="feature">🌍 كشف الدولة</div>
                         <div class="feature">🔧 جميع الأنواع</div>
                         <div class="feature">📊 إحصائيات متقدمة</div>
-                        <div class="feature">💾 واجهات مخصصة</div>
+                        <div class="feature">💾 حفظ في GitHub</div>
                         <div class="feature">🚀 تشغيل مستمر</div>
-                        <div class="feature">🔐 أمان متقدم</div>
+                        <div class="feature">🔐 إدارة المسؤول</div>
                     </div>
+                </div>
+
+                <div class="admin-panel">
+                    <h3>⚙️ لوحة التحكم</h3>
+                    <p>حالة البوت: <strong>{'✅ نشط' if config.bot_enabled else '⛔ متوقف'}</strong></p>
+                    <p>للتغيير، أرسل /toggle_bot إلى البوت</p>
                 </div>
             </div>
         </body>
@@ -249,14 +266,19 @@ def home():
 @app.route('/health')
 def health_check():
     return jsonify({
-        'status': 'healthy',
+        'status': 'healthy' if config.bot_enabled else 'disabled',
+        'bot_enabled': config.bot_enabled,
         'timestamp': ti.time(),
         'uptime': ti.time() - config.session_stats['start_time'],
-        'stats': config.session_stats
+        'stats': config.session_stats,
+        'support': SUPPORT_USER
     })
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    if not config.bot_enabled:
+        return 'Bot is disabled', 403
+        
     if request.headers.get('content-type') == 'application/json':
         json_string = request.get_data().decode('utf-8')
         update = types.Update.de_json(json_string)
@@ -267,6 +289,9 @@ def webhook():
 @app.route('/api/proxies', methods=['GET'])
 def api_get_proxies():
     """واجهة برمجة للحصول على البروكسيات الشغالة"""
+    if not config.bot_enabled:
+        return jsonify({'error': 'Bot is disabled', 'support': SUPPORT_USER}), 403
+        
     protocol = request.args.get('protocol', 'all')
     country = request.args.get('country', 'all')
     limit = int(request.args.get('limit', 50))
@@ -282,8 +307,86 @@ def api_get_proxies():
     return jsonify({
         'success': True,
         'count': len(filtered_proxies[:limit]),
-        'proxies': filtered_proxies[:limit]
+        'proxies': filtered_proxies[:limit],
+        'support': SUPPORT_USER
     })
+
+@app.route('/test-proxy', methods=['GET', 'POST'])
+def test_proxy_web():
+    """واجهة ويب لفحص البروكسيات"""
+    if not config.bot_enabled:
+        return "<h1>⛔ البوت متوقف حالياً</h1><p>يرجى التواصل مع المسؤول {}</p>".format(SUPPORT_USER)
+        
+    if request.method == 'POST':
+        proxy = request.form.get('proxy', '')
+        if proxy:
+            try:
+                # فحص البروكسي
+                result = advanced_proxy_check(proxy)
+                return f"""
+                <html>
+                <head>
+                    <title>نتيجة الفحص</title>
+                    <style>
+                        body {{ font-family: Arial; padding: 20px; background: #f5f5f5; }}
+                        .result {{ background: {'#d4edda' if result['working'] else '#f8d7da'}; padding: 20px; border-radius: 10px; margin: 20px 0; }}
+                        .btn {{ background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 5px; }}
+                    </style>
+                </head>
+                <body>
+                    <h2>🧪 نتيجة فحص البروكسي</h2>
+                    <div class="result">
+                        <h3>{'✅ البروكسي شغال' if result['working'] else '❌ البروكسي لا يعمل'}</h3>
+                        <p><strong>البروكسي:</strong> {proxy}</p>
+                        {f"<p><strong>IP الجديد:</strong> {result['ip']}</p>" if result['working'] else ""}
+                        {f"<p><strong>السرعة:</strong> {result['speed']} ثانية</p>" if result['working'] else ""}
+                        {f"<p><strong>النوع:</strong> {result['type']}</p>" if result['working'] else ""}
+                        {f"<p><strong>الدولة:</strong> {result['country']}</p>" if result['working'] else ""}
+                        {f"<p><strong>الاختبارات الناجحة:</strong> {result['tests_passed']}/{result['total_tests']}</p>" if result['working'] else ""}
+                    </div>
+                    <a href="/test-proxy" class="btn">فحص بروكسي آخر</a>
+                    <a href="/" class="btn">الرئيسية</a>
+                </body>
+                </html>
+                """
+            except Exception as e:
+                return f"<h2>❌ خطأ في الفحص</h2><p>{str(e)}</p><p>الدعم: {SUPPORT_USER}</p>"
+    
+    return '''
+    <html>
+    <head>
+        <title>🔧 فحص البروكسيات</title>
+        <style>
+            body { font-family: Arial; margin: 40px; background: #f5f5f5; }
+            .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            input, button { padding: 10px; margin: 5px; width: 100%; box-sizing: border-box; }
+            button { background: #007bff; color: white; border: none; cursor: pointer; }
+            button:hover { background: #0056b3; }
+            .support { background: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🧪 فحص البروكسيات يدوياً</h1>
+            <div class="support">
+                <strong>📞 الدعم:</strong> ''' + SUPPORT_USER + '''
+            </div>
+            <form method="POST">
+                <input type="text" name="proxy" placeholder="أدخل البروكسي (مثال: 194.35.125.100:8080 أو user:pass@194.35.125.100:8080)" required>
+                <button type="submit">فحص البروكسي</button>
+            </form>
+            <br>
+            <h3>📝 أمثلة على تنسيقات البروكسيات:</h3>
+            <ul>
+                <li>194.35.125.100:8080</li>
+                <li>user:password@194.35.125.100:8080</li>
+                <li>http://194.35.125.100:8080</li>
+                <li>socks5://194.35.125.100:1080</li>
+            </ul>
+        </div>
+    </body>
+    </html>
+    '''
 
 # 🛠️ أدوات مساعدة متقدمة
 def get_rotating_session():
@@ -321,149 +424,9 @@ def safe_request(url, timeout=15, max_retries=3):
     
     return None
 
-# 🎯 دوال السحب المتقدمة
-def fetch_from_smart_source(site_url):
-    """سحب ذكي من مصادر مختلفة"""
-    try:
-        logger.info(f"🔍 جلب ذكي من: {site_url}")
-        response = safe_request(site_url, timeout=20)
-        
-        if not response:
-            return []
-            
-        content = response.text
-        proxies = []
-        
-        # أنماط متقدمة للبروكسيات
-        patterns = [
-            # تنسيق IP:Port
-            r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d{2,5}\b',
-            # تنسيق user:pass@host:port
-            r'[a-zA-Z0-9_\-]+:[a-zA-Z0-9_\-]+@(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d{2,5}',
-            # تنسيق مع بروتوكول
-            r'(?:http|https|socks4|socks5)://[^\s<>"\']+',
-            # تنسيق JSON
-            r'"ip":\s*"([^"]+)",\s*"port":\s*(\d+)',
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, content)
-            for match in matches:
-                if isinstance(match, tuple):
-                    # تنسيق JSON
-                    ip, port = match
-                    proxies.append(f"http://{ip}:{port}")
-                else:
-                    # تنسيق نصي
-                    proxy = match.strip()
-                    if not proxy.startswith(('http://', 'https://', 'socks4://', 'socks5://')):
-                        proxy = f"http://{proxy}"
-                    proxies.append(proxy)
-        
-        # معالجة JSON من APIs
-        if 'geonode' in site_url or 'api' in site_url:
-            try:
-                data = js.loads(content)
-                if 'data' in data:
-                    for item in data['data']:
-                        ip = item.get('ip', '')
-                        port = item.get('port', '')
-                        protocol = item.get('protocols', ['http'])[0] if item.get('protocols') else 'http'
-                        if ip and port:
-                            proxies.append(f"{protocol}://{ip}:{port}")
-            except:
-                pass
-        
-        unique_proxies = list(set(proxies))
-        logger.info(f"✅ تم العثور على {len(unique_proxies)} بروكسي من {site_url}")
-        return unique_proxies
-        
-    except Exception as e:
-        logger.error(f"❌ خطأ في السحب الذكي: {e}")
-        return []
-
-def fetch_from_github_search(search_url):
-    """سحب متقدم من GitHub"""
-    try:
-        logger.info(f"💾 جلب من GitHub: {search_url}")
-        
-        # استخراج query من الرابط
-        parsed_url = urllib.parse.urlparse(search_url)
-        query_params = urllib.parse.parse_qs(parsed_url.query)
-        search_query = query_params.get('q', ['proxy list 2024'])[0]
-        
-        session = get_rotating_session()
-        cookies = {
-            '_octo': 'GH1.1.245589925.1739982689',
-            '_device_id': '6c2c8657c2b77f947183ca4ad86c2fd3',
-        }
-
-        all_proxies = []
-        
-        for page in range(1, config.pull_settings['max_pages'] + 1):
-            params = {
-                'q': search_query,
-                'type': 'code',
-                'p': str(page)
-            }
-            
-            try:
-                response = session.get(
-                    'https://github.com/search',
-                    params=params,
-                    cookies=cookies,
-                    timeout=25
-                )
-                
-                if response.status_code == 200:
-                    proxies = extract_proxies_from_text(response.text)
-                    all_proxies.extend(proxies)
-                    logger.info(f"📄 صفحة {page}: {len(proxies)} بروكسي")
-                else:
-                    break
-                    
-            except Exception as e:
-                logger.error(f"❌ خطأ في صفحة GitHub {page}: {e}")
-                break
-            
-            ti.sleep(config.pull_settings['delay_between_requests'])
-        
-        unique_proxies = list(set(all_proxies))
-        logger.info(f"✅ إجمالي من GitHub: {len(unique_proxies)} بروكسي")
-        return unique_proxies
-        
-    except Exception as e:
-        logger.error(f"❌ خطأ في سحب GitHub: {e}")
-        return []
-
-def extract_proxies_from_text(text):
-    """استخراج متقدم للبروكسيات من النص"""
-    advanced_patterns = [
-        # جميع التنسيقات المدعومة
-        r'[a-zA-Z0-9_\-]+:[a-zA-Z0-9_\-@]+@(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d{2,5}',
-        r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d{2,5}\b',
-        r'http://[^\s<>"\']+',
-        r'https://[^\s<>"\']+', 
-        r'socks4://[^\s<>"\']+',
-        r'socks5://[^\s<>"\']+',
-        r'proxy:\s*([^\s<>"\']+)',
-        r'proxies?[=:]\s*([^\s<>"\']+)'
-    ]
-    
-    proxies = []
-    for pattern in advanced_patterns:
-        try:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            proxies.extend(matches)
-        except Exception as e:
-            logger.warning(f"خطأ في النمط {pattern}: {e}")
-            continue
-    
-    return list(set(proxies))
-
-# 🎯 نظام الفحص المتقدم
+# 🎯 نظام الفحص المتقدم مع 10+ مواقع
 def advanced_proxy_check(proxy):
-    """فحص متقدم للبروكسي"""
+    """فحص متقدم للبروكسي مع 10+ مواقع اختبار"""
     try:
         logger.info(f"🔍 فحص متقدم: {proxy}")
         
@@ -476,53 +439,45 @@ def advanced_proxy_check(proxy):
         # الحصول على IP الأصلي
         original_ip = get_original_ip()
         
-        # اختبارات متعددة
+        # اختبارات متعددة على 10+ مواقع
         test_results = []
         start_time = ti.time()
+        successful_ips = set()
         
-        test_urls = [
-            ("http://httpbin.org/ip", "HTTP Basic"),
-            ("https://httpbin.org/ip", "HTTPS Basic"), 
-            ("http://api.ipify.org", "IP Detection"),
-            ("http://ident.me", "Alternative IP"),
-        ]
-        
-        for test_url, test_name in test_urls:
+        for test_url in TEST_SITES:
             try:
                 test_start = ti.time()
                 response = rq.get(test_url, proxies=proxy_dict, timeout=8)
                 test_time = ti.time() - test_start
                 
                 if response.status_code == 200:
-                    if 'httpbin' in test_url:
-                        data = response.json()
-                        proxy_ip = data.get('origin', '')
-                    else:
-                        proxy_ip = response.text.strip()
+                    # استخراج IP من الاستجابة
+                    proxy_ip = extract_ip_from_response(response, test_url)
                     
                     if proxy_ip and proxy_ip != original_ip:
                         test_results.append({
-                            'test': test_name,
+                            'site': test_url,
                             'success': True,
                             'speed': test_time,
                             'ip': proxy_ip
                         })
+                        successful_ips.add(proxy_ip)
                     else:
                         test_results.append({
-                            'test': test_name, 
+                            'site': test_url, 
                             'success': False,
-                            'error': 'Same IP as original'
+                            'error': 'Same IP as original or invalid IP'
                         })
                 else:
                     test_results.append({
-                        'test': test_name,
+                        'site': test_url,
                         'success': False,
                         'error': f'Status {response.status_code}'
                     })
                     
             except Exception as e:
                 test_results.append({
-                    'test': test_name,
+                    'site': test_url,
                     'success': False,
                     'error': str(e)
                 })
@@ -531,7 +486,7 @@ def advanced_proxy_check(proxy):
         successful_tests = [r for r in test_results if r['success']]
         total_time = ti.time() - start_time
         
-        if successful_tests:
+        if successful_tests and len(successful_ips) > 0:
             # احسب متوسط السرعة
             speeds = [r['speed'] for r in successful_tests if 'speed' in r]
             avg_speed = sum(speeds) / len(speeds) if speeds else total_time
@@ -545,20 +500,21 @@ def advanced_proxy_check(proxy):
             elif proxy.startswith('socks5://'):
                 proxy_type = "SOCKS5"
             
-            # احصل على معلومات الدولة
-            country, country_code = get_country_from_ip(successful_tests[0]['ip'])
+            # احصل على معلومات الدولة من أول IP ناجح
+            country, country_code = get_country_from_ip(list(successful_ips)[0])
             
             return {
                 'proxy': proxy,
                 'working': True,
                 'speed': round(avg_speed, 2),
-                'ip': successful_tests[0]['ip'],
+                'ip': list(successful_ips)[0],
                 'type': proxy_type,
                 'country': country,
                 'country_code': country_code,
                 'tests_passed': len(successful_tests),
                 'total_tests': len(test_results),
-                'anonymity': 'elite' if original_ip != successful_tests[0]['ip'] else 'transparent'
+                'successful_sites': [r['site'] for r in successful_tests],
+                'anonymity': 'elite' if original_ip != list(successful_ips)[0] else 'transparent'
             }
         else:
             return {
@@ -584,11 +540,30 @@ def advanced_proxy_check(proxy):
             'error': str(e)
         }
 
+def extract_ip_from_response(response, test_url):
+    """استخراج IP من استجابة الموقع"""
+    try:
+        if 'ipify' in test_url or 'ipinfo' in test_url or 'myip' in test_url or 'ipapi' in test_url:
+            data = response.json()
+            return data.get('ip', '')
+        elif 'httpbin' in test_url:
+            data = response.json()
+            return data.get('origin', '')
+        elif 'ident.me' in test_url or 'seeip' in test_url or 'ipecho' in test_url or 'amazonaws' in test_url:
+            return response.text.strip()
+        else:
+            # محاولة استخراج IP من النص
+            ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
+            matches = re.findall(ip_pattern, response.text)
+            return matches[0] if matches else ''
+    except:
+        return ''
+
 def get_original_ip():
     """الحصول على IP الأصلي"""
     try:
-        response = rq.get("http://httpbin.org/ip", timeout=5)
-        return response.json().get('origin', '')
+        response = rq.get("https://api.ipify.org?format=json", timeout=5)
+        return response.json().get('ip', '')
     except:
         return "Unknown"
 
@@ -606,6 +581,10 @@ def get_country_from_ip(ip):
 # 🎯 نظام السحب الذكي
 def smart_pull_proxies(chat_id):
     """سحب ذكي من جميع المصادر"""
+    if not config.bot_enabled:
+        b.send_message(chat_id, "⛔ البوت متوقف حالياً. يرجى التواصل مع المسؤول.")
+        return []
+        
     b.send_message(chat_id, "🚀 بدء السحب الذكي للبروكسيات...")
     
     all_proxies = []
@@ -621,19 +600,14 @@ def smart_pull_proxies(chat_id):
             
             for site_url in source_info['sites']:
                 try:
-                    if source_info['type'] == 'smart':
-                        proxies = fetch_from_smart_source(site_url)
-                    elif source_info['type'] == 'github':
-                        proxies = fetch_from_github_search(site_url)
-                    elif source_info['type'] == 'api':
-                        proxies = fetch_from_smart_source(site_url)
-                    else:
-                        proxies = []
+                    response = safe_request(site_url, timeout=20)
                     
-                    if proxies:
-                        source_proxies.extend(proxies)
-                        successful_sites += 1
-                        logger.info(f"✅ {source_info['name']}: {len(proxies)} من {site_url}")
+                    if response and response.status_code == 200:
+                        proxies = extract_proxies_from_text(response.text)
+                        if proxies:
+                            source_proxies.extend(proxies)
+                            successful_sites += 1
+                            logger.info(f"✅ {source_info['name']}: {len(proxies)} من {site_url}")
                     
                     ti.sleep(config.pull_settings['delay_between_requests'])
                     
@@ -657,9 +631,8 @@ def smart_pull_proxies(chat_id):
     
     # حفظ البروكسيات المسحوبة
     if unique_proxies:
-        with open("pulled_proxies.txt", "w", encoding="utf-8") as f:
-            for proxy in unique_proxies:
-                f.write(f"{proxy}\n")
+        save_proxies_to_file(unique_proxies, "pulled_proxies.txt")
+        save_proxies_to_github_format(unique_proxies, "github_proxies.txt")
     
     # إنشاء تقرير
     sources_report = "📋 **تفصيل المصادر:**\n"
@@ -697,18 +670,120 @@ def smart_pull_proxies(chat_id):
     
     return unique_proxies
 
+def extract_proxies_from_text(text):
+    """استخراج متقدم للبروكسيات من النص"""
+    advanced_patterns = [
+        r'[a-zA-Z0-9_\-]+:[a-zA-Z0-9_\-@]+@(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d{2,5}',
+        r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d{2,5}\b',
+        r'http://[^\s<>"\']+',
+        r'https://[^\s<>"\']+', 
+        r'socks4://[^\s<>"\']+',
+        r'socks5://[^\s<>"\']+',
+    ]
+    
+    proxies = []
+    for pattern in advanced_patterns:
+        try:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            proxies.extend(matches)
+        except Exception as e:
+            logger.warning(f"خطأ في النمط {pattern}: {e}")
+            continue
+    
+    return list(set(proxies))
+
+# 💾 نظام حفظ الملفات
+def save_proxies_to_file(proxies, filename):
+    """حفظ البروكسيات في ملف"""
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            for proxy in proxies:
+                f.write(f"{proxy}\n")
+        logger.info(f"💾 تم حفظ {len(proxies)} بروكسي في {filename}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ خطأ في حفظ الملف {filename}: {e}")
+        return False
+
+def save_proxies_to_github_format(proxies, filename):
+    """حفظ البروكسيات بصيغة مناسبة لـ GitHub"""
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("# 🚀 قائمة البروكسيات الشغالة\n\n")
+            f.write("تم إنشاؤها تلقائياً بواسطة Proxy Master Bot\n\n")
+            f.write("## 📋 البروكسيات:\n```\n")
+            for proxy in proxies:
+                f.write(f"{proxy}\n")
+            f.write("```\n\n")
+            f.write(f"## 📊 الإحصائيات:\n")
+            f.write(f"- العدد الإجمالي: {len(proxies)}\n")
+            f.write(f"- وقت الإنشاء: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"- الدعم: {SUPPORT_USER}\n")
+        return True
+    except Exception as e:
+        logger.error(f"❌ خطأ في حفظ ملف GitHub: {e}")
+        return False
+
+def save_working_proxies_to_github(proxies_list):
+    """حفظ البروكسيات الشغالة بصيغة GitHub"""
+    if not proxies_list:
+        return False
+        
+    filename = "working_proxies_github.txt"
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("# 🎯 البروكسيات الشغالة - Proxy Master Bot\n\n")
+            f.write("## 📊 ملخص النتائج:\n")
+            f.write(f"- عدد البروكسيات الشغالة: {len(proxies_list)}\n")
+            f.write(f"- وقت الفحص: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"- الدعم: {SUPPORT_USER}\n\n")
+            
+            f.write("## 🔧 حسب النوع:\n")
+            by_type = {}
+            for proxy_info in proxies_list:
+                ptype = proxy_info.get('type', 'Unknown')
+                by_type[ptype] = by_type.get(ptype, 0) + 1
+            
+            for ptype, count in by_type.items():
+                f.write(f"- {ptype}: {count}\n")
+            
+            f.write("\n## 🌍 حسب الدولة:\n")
+            by_country = {}
+            for proxy_info in proxies_list:
+                country = proxy_info.get('country', 'Unknown')
+                by_country[country] = by_country.get(country, 0) + 1
+            
+            for country, count in sorted(by_country.items(), key=lambda x: x[1], reverse=True)[:10]:
+                f.write(f"- {country}: {count}\n")
+            
+            f.write("\n## 📋 قائمة البروكسيات:\n```\n")
+            for proxy_info in proxies_list:
+                f.write(f"{proxy_info['proxy']}\n")
+            f.write("```\n")
+        
+        logger.info(f"💾 تم حفظ {len(proxies_list)} بروكسي شغال بصيغة GitHub")
+        return filename
+    except Exception as e:
+        logger.error(f"❌ خطأ في حفظ ملف GitHub: {e}")
+        return None
+
 # 🎯 نظام الفحص المتقدم
 def advanced_mass_check(proxies_list, chat_id):
     """فحص جماعي متقدم"""
+    if not config.bot_enabled:
+        b.send_message(chat_id, "⛔ البوت متوقف حالياً. يرجى التواصل مع المسؤول.")
+        return [], 0
+        
     b.send_message(chat_id, f"""
 🔬 **بدء الفحص المتقدم**
 
 📋 عدد البروكسيات: {len(proxies_list)}
 👥 خيوط الفحص: {config.filter_settings['max_workers']}
+🌐 مواقع الاختبار: {len(TEST_SITES)}
 ⚡ فحص متقدم: ✅ مفعل
 
 **سيتم إجراء:**
-• اختبار اتصال متعدد
+• اختبار اتصال على {len(TEST_SITES)} موقع
 • قياس سرعة دقيق  
 • كشف نوع البروكسي
 • تحديد مستوى الخصوصية
@@ -793,6 +868,7 @@ def generate_detailed_report(proxies_list, elapsed_time):
 
 ✅ الإجمالي: {len(proxies_list)} بروكسي
 ⏱ وقت الفحص: {elapsed_time:.2f} ثانية
+🌐 مواقع الاختبار: {len(TEST_SITES)}
 
 ⚡ **التوزيع حسب السرعة:**
 • سريعة (<2s): {len(by_speed['fast'])}
@@ -813,60 +889,173 @@ def generate_detailed_report(proxies_list, elapsed_time):
     for i, proxy in enumerate(fast_proxies[:5], 1):
         report += f"{i}. `{proxy['proxy']}`\n"
         report += f"   ⚡ {proxy['speed']}s | 🌍 {proxy['country']} | 🔧 {proxy['type']}\n\n"
+
+    report += f"\n📞 **الدعم:** {SUPPORT_USER}"
     
     return report
 
 # 🤖 Handlers للبوت
 @b.message_handler(commands=['start'])
 def send_welcome(message):
+    if not config.bot_enabled:
+        b.send_message(message.chat.id, f"⛔ البوت متوقف حالياً. يرجى التواصل مع المسؤول {SUPPORT_USER}")
+        return
+        
     if message.from_user.id == ADMIN_ID:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
         buttons = [
             "🚀 سحب ذكي", 
             "🔍 فحص متقدم",
             "📁 فحص من ملف",
-            "⚙️ الإعدادات المتقدمة",
+            "⚙️ إدارة المسؤول",
             "📊 إحصائيات حية",
-            "🌍 واجهات برمجة",
+            "🌐 فحص يدوي",
             "🆘 المساعدة"
         ]
         markup.add(*buttons)
         
-        welcome_text = """
-🚀 **أهلاً بك في ℙℛᎾXᎽ ℙℳᎾ 𖠛** 
+        welcome_text = f"""
+🚀 **أهلاً بك في Proxy Master Bot!** 
 
-🎯 ** أقوى أداة سحب وفحص بروكسيات **
+🎯 **أقوى أداة سحب وفحص بروكسيات على Render.com**
 
 ✅ **المميزات المتقدمة:**
-• 🔍 سحب ذكي من 20+ مصدر
-• ⚡ فحص متعدد الخيوط (حتى 20 خيط)
+• 🔍 سحب ذكي من 15+ مصدر
+• ⚡ فحص على 10+ مواقع (ipinfo.io وغيره)
 • 🌍 كشف الدولة والخصوصية
 • 🔧 دعم جميع أنواع البروكسيات
 • 📊 إحصائيات وتقارير متقدمة
-• 💾 واجهات برمجة مخصصة
+• 💾 حفظ بصيغة GitHub
 • 🚀 تشغيل مستمر 24/7
+
+📞 **الدعم:** {SUPPORT_USER}
 
 📋 **لبدء الاستخدام:**
 1. 🚀 سحب ذكي - لجمع البروكسيات
 2. 🔍 فحص متقدم - لاختبار الجودة
 3. 📁 فحص من ملف - لفحص قوائم جاهزة
 
-⚙️ **الإعدادات المتقدمة تتيح لك:**
-• اختيار نوع البروكسيات
-• ضبط سرعة الفحص
-• إضافة واجهات برمجة
-• تخصيص الفلترة
+⚙️ **أوامر المسؤول:**
+/toggle_bot - تشغيل/إيقاف البوت
+/stats - إحصائيات مفصلة
+/test URL - فحص بروكسي يدوي
         """
         b.send_message(message.chat.id, welcome_text, reply_markup=markup, parse_mode="Markdown")
     else:
-        b.send_message(message.chat.id, "⛔️ أنت لست مسؤولاً مصرحًا به.")
+        b.send_message(message.chat.id, f"⛔ أنت لست مسؤولاً مصرحًا به. الدعم: {SUPPORT_USER}")
+
+@b.message_handler(commands=['toggle_bot'])
+def toggle_bot(message):
+    """تشغيل/إيقاف البوت (للمسؤول فقط)"""
+    if message.from_user.id == ADMIN_ID:
+        config.bot_enabled = not config.bot_enabled
+        status = "✅ تم تشغيل البوت" if config.bot_enabled else "⛔ تم إيقاف البوت"
+        b.send_message(message.chat.id, f"{status}\n\n📞 الدعم: {SUPPORT_USER}")
+        
+        # تسجيل في السجلات
+        logger.info(f"البوت { 'مفعل' if config.bot_enabled else 'موقف' } بواسطة المسؤول")
+    else:
+        b.send_message(message.chat.id, f"⛔ ليس لديك صلاحية هذه الأمر. الدعم: {SUPPORT_USER}")
+
+@b.message_handler(commands=['stats'])
+def show_stats(message):
+    """إظهار إحصائيات مفصلة"""
+    if not config.bot_enabled:
+        b.send_message(message.chat.id, f"⛔ البوت متوقف حالياً. الدعم: {SUPPORT_USER}")
+        return
+        
+    uptime = ti.time() - config.session_stats['start_time']
+    hours, remainder = divmod(uptime, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    stats_text = f"""
+📊 **إحصائيات البوت المتقدمة**
+
+🕒 وقت التشغيل: {int(hours)}h {int(minutes)}m {int(seconds)}s
+🔗 بروكسيات مسحوبة: {config.session_stats['total_proxies_found']}
+✅ بروكسيات شغالة: {config.session_stats['working_proxies_found']}
+🔍 بروكسيات مفحوصة: {config.session_stats['total_proxies_checked']}
+
+🌐 **المصادر النشطة:**
+"""
+    
+    for source_id, source_info in PROXY_SOURCES.items():
+        if source_info['enabled']:
+            stats_text += f"• {source_info['name']}: {len(source_info['sites'])} موقع\n"
+    
+    stats_text += f"""
+⚡ **مواقع الفحص:** {len(TEST_SITES)} موقع
+🔧 **الحالة:** {'✅ نشط' if config.bot_enabled else '⛔ متوقف'}
+
+📞 **الدعم:** {SUPPORT_USER}
+    """
+    
+    b.send_message(message.chat.id, stats_text, parse_mode="Markdown")
+
+@b.message_handler(commands=['test'])
+def test_single_proxy_command(message):
+    """فحص بروكسي فردي عبر الأمر"""
+    if not config.bot_enabled:
+        b.send_message(message.chat.id, f"⛔ البوت متوقف حالياً. الدعم: {SUPPORT_USER}")
+        return
+        
+    try:
+        proxy = message.text.split(' ', 1)[1].strip()
+    except:
+        b.send_message(message.chat.id, f"❌ استخدم: /test proxy_url\nمثال: /test http://194.35.125.100:8080\n\n📞 الدعم: {SUPPORT_USER}")
+        return
+    
+    b.send_message(message.chat.id, f"🔍 جاري فحص البروكسي: `{proxy}`", parse_mode="Markdown")
+    
+    result = advanced_proxy_check(proxy)
+    
+    if result['working']:
+        response_text = f"""
+🎉 **البروكسي شغال!**
+
+✅ `{result['proxy']}`
+⚡ **السرعة:** {result['speed']} ثانية
+🔧 **النوع:** {result['type']}
+🌐 **IP الجديد:** {result['ip']}
+🏴 **الدولة:** {result['country']}
+📊 **الاختبارات:** {result['tests_passed']}/{result['total_tests']}
+
+**تم الفحص على {len(TEST_SITES)} موقع بنجاح!** ✅
+        """
+    else:
+        response_text = f"""
+❌ **البروكسي لا يعمل**
+
+`{proxy}`
+
+**الأسباب المحتملة:**
+• الخادم غير متصل
+• البورت مغلق
+• بيانات الدخول خاطئة
+• البروكسي محظور
+
+**جرب بروكسي آخر** 🔄
+        """
+    
+    b.send_message(message.chat.id, response_text, parse_mode="Markdown")
 
 @b.message_handler(func=lambda message: message.text == "🚀 سحب ذكي")
 def start_smart_pull(message):
-    proxies = smart_pull_proxies(message.chat.id)
+    if not config.bot_enabled:
+        b.send_message(message.chat.id, f"⛔ البوت متوقف حالياً. الدعم: {SUPPORT_USER}")
+        return
+        
+    if message.from_user.id == ADMIN_ID:
+        proxies = smart_pull_proxies(message.chat.id)
+    else:
+        b.send_message(message.chat.id, f"⛔ ليس لديك صلاحية هذه الأمر. الدعم: {SUPPORT_USER}")
 
 @b.message_handler(func=lambda message: message.text == "🔍 فحص متقدم")
 def start_advanced_check(message):
+    if not config.bot_enabled:
+        b.send_message(message.chat.id, f"⛔ البوت متوقف حالياً. الدعم: {SUPPORT_USER}")
+        return
+        
     try:
         with open("pulled_proxies.txt", "r", encoding="utf-8") as f:
             proxies = [line.strip() for line in f if line.strip()]
@@ -885,26 +1074,179 @@ def start_advanced_check(message):
                     for proxy_info in working_proxies:
                         f.write(f"{proxy_info['proxy']}\n")
                 
+                # حفظ بصيغة GitHub
+                github_file = save_working_proxies_to_github(working_proxies)
+                
                 with open("working_proxies.txt", "rb") as f:
                     b.send_document(message.chat.id, f, caption=f"📁 البروكسيات الشغالة ({len(working_proxies)})")
+                
+                if github_file:
+                    with open(github_file, "rb") as f:
+                        b.send_document(message.chat.id, f, caption="💾 ملف GitHub جاهز للرفع")
         else:
             b.send_message(message.chat.id, "❌ لا توجد بروكسيات مسحوبة. قم بالسحب أولاً.")
     except FileNotFoundError:
         b.send_message(message.chat.id, "❌ لا توجد بروكسيات مسحوبة. قم بالسحب أولاً.")
 
-# ... (المزيد من الhandlers) ...
+@b.message_handler(func=lambda message: message.text == "📁 فحص من ملف")
+def check_from_file(message):
+    if not config.bot_enabled:
+        b.send_message(message.chat.id, f"⛔ البوت متوقف حالياً. الدعم: {SUPPORT_USER}")
+        return
+        
+    b.send_message(message.chat.id, "📁 أرسل ملف البروكسيات (txt)")
+    config.user_states[message.chat.id] = 'awaiting_check_file'
+
+@b.message_handler(func=lambda message: message.text == "🌐 فحص يدوي")
+def manual_test_info(message):
+    if not config.bot_enabled:
+        b.send_message(message.chat.id, f"⛔ البوت متوقف حالياً. الدعم: {SUPPORT_USER}")
+        return
+        
+    test_info = f"""
+🌐 **الفحص اليدوي عبر المتصفح**
+
+يمكنك فحص البروكسيات يدوياً عبر:
+1. **الويب:** {RENDER_URL}/test-proxy
+2. **الأمر:** /test proxy_url
+3. **الواجهة:** {RENDER_URL}
+
+📋 **مواقع الفحص المستخدمة:**
+"""
+    
+    for site in TEST_SITES:
+        test_info += f"• {site}\n"
+    
+    test_info += f"\n📞 **الدعم:** {SUPPORT_USER}"
+    
+    b.send_message(message.chat.id, test_info, parse_mode="Markdown")
+
+@b.message_handler(func=lambda message: message.text == "⚙️ إدارة المسؤول")
+def admin_panel(message):
+    if message.from_user.id == ADMIN_ID:
+        admin_text = f"""
+⚙️ **لوحة تحكم المسؤول**
+
+🔧 **حالة البوت:** {'✅ نشط' if config.bot_enabled else '⛔ متوقف'}
+📊 **الإحصائيات:** {config.session_stats['working_proxies_found']} بروكسي شغال
+🌐 **الواجهات:** {RENDER_URL}
+
+🎯 **الأوامر المتاحة:**
+/toggle_bot - تشغيل/إيقاف البوت
+/stats - إحصائيات مفصلة  
+/test URL - فحص بروكسي
+
+📞 **الدعم:** {SUPPORT_USER}
+        """
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.add(
+            types.InlineKeyboardButton("🔄 " + ("إيقاف البوت" if config.bot_enabled else "تشغيل البوت"), callback_data="toggle_bot"),
+            types.InlineKeyboardButton("📊 الإحصائيات", callback_data="show_stats")
+        )
+        
+        b.send_message(message.chat.id, admin_text, reply_markup=markup, parse_mode="Markdown")
+    else:
+        b.send_message(message.chat.id, f"⛔ ليس لديك صلاحية الوصول. الدعم: {SUPPORT_USER}")
+
+@b.message_handler(func=lambda message: message.text == "🆘 المساعدة")
+def help_command(message):
+    help_text = f"""
+🆘 **دليل استخدام البوت**
+
+🚀 **لبدء الاستخدام:**
+1. اضغط على \"🚀 سحب ذكي\" لجمع البروكسيات
+2. اضغط على \"🔍 فحص متقدم\" لاختبارها
+3. احصل على الملف النهائي
+
+🔧 **الفحص اليدوي:**
+• عبر المتصفح: {RENDER_URL}/test-proxy
+• عبر الأمر: /test proxy_url
+
+📁 **فحص الملفات:**
+• أرسل ملف txt يحتوي على بروكسيات
+• بروكسي في كل سطر
+
+⚙️ **للمسؤولين:**
+• /toggle_bot - التحكم بالبوت
+• /stats - إحصائيات مفصلة
+
+📞 **الدعم:** {SUPPORT_USER}
+    """
+    b.send_message(message.chat.id, help_text, parse_mode="Markdown")
+
+@b.message_handler(content_types=['document'])
+def handle_document(message):
+    if not config.bot_enabled:
+        b.send_message(message.chat.id, f"⛔ البوت متوقف حالياً. الدعم: {SUPPORT_USER}")
+        return
+        
+    if config.user_states.get(message.chat.id) == 'awaiting_check_file':
+        try:
+            file_info = b.get_file(message.document.file_id)
+            downloaded_file = b.download_file(file_info.file_path)
+            
+            filename = f"user_proxies_{message.chat.id}.txt"
+            with open(filename, 'wb') as f:
+                f.write(downloaded_file)
+            
+            # قراءة البروكسيات من الملف
+            proxies = []
+            with open(filename, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        proxies.append(line)
+            
+            b.send_message(message.chat.id, f"📥 تم تحميل {len(proxies)} بروكسي من الملف")
+            config.user_states[message.chat.id] = None
+            
+            # بدء الفحص
+            if proxies:
+                b.send_message(message.chat.id, "🔬 بدء فحص البروكسيات من الملف...")
+                working_proxies, elapsed_time = advanced_mass_check(proxies, message.chat.id)
+                
+                # إرسال النتائج
+                report = generate_detailed_report(working_proxies, elapsed_time)
+                b.send_message(message.chat.id, report, parse_mode="Markdown")
+                
+                if working_proxies:
+                    with open("working_proxies.txt", "w", encoding="utf-8") as f:
+                        for proxy_info in working_proxies:
+                            f.write(f"{proxy_info['proxy']}\n")
+                    
+                    with open("working_proxies.txt", "rb") as f:
+                        b.send_document(message.chat.id, f, caption=f"📁 البروكسيات الشغالة ({len(working_proxies)})")
+            
+        except Exception as e:
+            b.send_message(message.chat.id, f"❌ خطأ في تحميل الملف: {e}\n\n📞 الدعم: {SUPPORT_USER}")
+            config.user_states[message.chat.id] = None
 
 @b.callback_query_handler(func=lambda call: True)
 def handle_callbacks(call):
     chat_id = call.message.chat.id
     
-    if call.data == "advanced_check":
-        b.send_message(chat_id, "🔬 بدء الفحص المتقدم...")
-        # ... تطبيق الفحص المتقدم
-        
+    if call.data == "toggle_bot" and call.from_user.id == ADMIN_ID:
+        config.bot_enabled = not config.bot_enabled
+        status = "✅ تم تشغيل البوت" if config.bot_enabled else "⛔ تم إيقاف البوت"
+        b.answer_callback_query(call.id, status)
+        admin_panel(call.message)
+    
+    elif call.data == "show_stats":
+        show_stats(call.message)
+        b.answer_callback_query(call.id, "تم عرض الإحصائيات")
+    
+    elif call.data == "advanced_check":
+        b.answer_callback_query(call.id, "بدء الفحص المتقدم")
+        start_advanced_check(call.message)
+    
     elif call.data == "quick_check":
-        b.send_message(chat_id, "⚡ بدء الفحص السريع...")
-        # ... تطبيق الفحص السريع
+        b.answer_callback_query(call.id, "بدء الفحص السريع")
+        # يمكنك إضافة فحص سريع هنا
+    
+    elif call.data == "skip_check":
+        b.answer_callback_query(call.id, "تم تخطي الفحص")
+        b.send_message(chat_id, "✅ تم تخطي الفحص. يمكنك فحص البروكسيات لاحقاً.")
 
 # 🚀 تشغيل البوت
 def setup_webhook():
@@ -923,6 +1265,7 @@ def setup_webhook():
 
 if __name__ == "__main__":
     logger.info("🚀 بدء تشغيل Proxy Master Bot على Render.com...")
+    logger.info(f"📞 دعم المسؤول: {SUPPORT_USER}")
     
     # محاولة إعداد Webhook
     webhook_setup = setup_webhook()
@@ -932,9 +1275,11 @@ if __name__ == "__main__":
 🎉 Proxy Master Bot يعمل على Render.com!
 ✅ Webhook: {RENDER_URL}/webhook
 ✅ الواجهة: {RENDER_URL}
+✅ فحص يدوي: {RENDER_URL}/test-proxy
 ✅ API: {RENDER_URL}/api/proxies
 ✅ الصحة: {RENDER_URL}/health
 
+📞 الدعم: {SUPPORT_USER}
 📊 البوت جاهز للعمل بكامل الميزات!
         """)
         
@@ -943,9 +1288,10 @@ if __name__ == "__main__":
         app.run(host='0.0.0.0', port=port, debug=False)
         
     else:
-        print("""
+        print(f"""
 🔄 استخدام Polling mode
 ✅ جميع الميزات تعمل
+📞 الدعم: {SUPPORT_USER}
 💡 Webhook مفقود - باستخدام Polling
         """)
         b.infinity_polling(timeout=60, long_polling_timeout=60)
