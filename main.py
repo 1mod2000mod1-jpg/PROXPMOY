@@ -915,7 +915,7 @@ def send_welcome(message):
         markup.add(*buttons)
         
         welcome_text = f"""
-🚀 **أهلاً بك في Proxy Master Bot!** 
+🚀 **أهلاً بك في ℙℛᎾXᎽ ℙℳᎾ 𖠛** 
 
 🎯 **أقوى أداة سحب وفحص بروكسيات على Render.com**
 
@@ -1272,7 +1272,7 @@ if __name__ == "__main__":
     
     if webhook_setup and RENDER_URL:
         print(f"""
-🎉 Proxy Master Bot يعمل على Render.com!
+🎉 Proxy Master Bot يعمل على ℙℛᎾXᎽ ℙℳᎾ 𖠛!
 ✅ Webhook: {RENDER_URL}/webhook
 ✅ الواجهة: {RENDER_URL}
 ✅ فحص يدوي: {RENDER_URL}/test-proxy
