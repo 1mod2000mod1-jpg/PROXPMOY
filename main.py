@@ -14,6 +14,9 @@ import urllib.parse
 from datetime import datetime, timedelta
 import sqlite3
 import hashlib
+import io
+import base64
+from urllib.parse import urlparse
 
 # إعداد Flask لـ Render
 app = Flask(__name__)
@@ -38,7 +41,7 @@ BOT_OWNER = '@xtt19x'
 
 b = tb.TeleBot(BOT_TOKEN)
 
-# 🎯 قاعدة بيانات المستخدمين
+# 🎯 قاعدة بيانات المستخدمين المتقدمة
 class UserDatabase:
     def __init__(self):
         self.conn = sqlite3.connect('users.db', check_same_thread=False)
@@ -57,7 +60,12 @@ class UserDatabase:
                 requests_today INTEGER DEFAULT 0,
                 last_request_date TEXT,
                 is_banned INTEGER DEFAULT 0,
-                is_premium INTEGER DEFAULT 0
+                is_premium INTEGER DEFAULT 0,
+                points INTEGER DEFAULT 0,
+                custom_sources TEXT,
+                max_proxies_per_check INTEGER DEFAULT 50,
+                check_speed TEXT DEFAULT 'normal',
+                auto_cleanup INTEGER DEFAULT 1
             )
         ''')
         
@@ -68,19 +76,42 @@ class UserDatabase:
             )
         ''')
         
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS working_proxies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                proxy TEXT UNIQUE,
+                proxy_type TEXT,
+                country TEXT,
+                speed REAL,
+                last_checked TEXT,
+                added_by INTEGER,
+                source TEXT
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS custom_sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                source_name TEXT,
+                source_url TEXT,
+                source_type TEXT,
+                is_active INTEGER DEFAULT 1
+            )
+        ''')
+        
         # إعدادات افتراضية
-        cursor.execute('''
-            INSERT OR IGNORE INTO bot_settings (key, value) 
-            VALUES ('bot_enabled', 'true')
-        ''')
-        cursor.execute('''
-            INSERT OR IGNORE INTO bot_settings (key, value) 
-            VALUES ('maintenance_mode', 'false')
-        ''')
-        cursor.execute('''
-            INSERT OR IGNORE INTO bot_settings (key, value) 
-            VALUES ('free_mode', 'true')
-        ''')
+        settings = [
+            ('bot_enabled', 'true'),
+            ('maintenance_mode', 'false'),
+            ('free_mode', 'true'),
+            ('max_workers', '20'),
+            ('auto_cleanup_days', '7'),
+            ('duplicate_check', 'true')
+        ]
+        
+        for key, value in settings:
+            cursor.execute('INSERT OR IGNORE INTO bot_settings (key, value) VALUES (?, ?)', (key, value))
         
         self.conn.commit()
     
@@ -135,6 +166,65 @@ class UserDatabase:
         cursor = self.conn.cursor()
         cursor.execute('SELECT * FROM users')
         return cursor.fetchall()
+    
+    def update_user_points(self, user_id, points):
+        cursor = self.conn.cursor()
+        cursor.execute('UPDATE users SET points = points + ? WHERE user_id = ?', (points, user_id))
+        self.conn.commit()
+    
+    def set_user_premium(self, user_id, is_premium=True):
+        cursor = self.conn.cursor()
+        cursor.execute('UPDATE users SET is_premium = ? WHERE user_id = ?', (1 if is_premium else 0, user_id))
+        self.conn.commit()
+    
+    def update_user_setting(self, user_id, setting, value):
+        cursor = self.conn.cursor()
+        cursor.execute(f'UPDATE users SET {setting} = ? WHERE user_id = ?', (value, user_id))
+        self.conn.commit()
+    
+    def add_custom_source(self, user_id, name, url, source_type):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO custom_sources (user_id, source_name, source_url, source_type)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, name, url, source_type))
+        self.conn.commit()
+    
+    def get_custom_sources(self, user_id):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM custom_sources WHERE user_id = ? AND is_active = 1', (user_id,))
+        return cursor.fetchall()
+    
+    def add_working_proxy(self, proxy, proxy_type, country, speed, user_id, source):
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT OR REPLACE INTO working_proxies 
+                (proxy, proxy_type, country, speed, last_checked, added_by, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (proxy, proxy_type, country, speed, datetime.now().isoformat(), user_id, source))
+            self.conn.commit()
+            return True
+        except:
+            return False
+    
+    def get_working_proxies_count(self):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM working_proxies')
+        return cursor.fetchone()[0]
+    
+    def get_proxies_by_type(self, proxy_type):
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT proxy FROM working_proxies WHERE proxy_type = ?', (proxy_type,))
+        return [row[0] for row in cursor.fetchall()]
+    
+    def cleanup_old_proxies(self, days=7):
+        cursor = self.conn.cursor()
+        cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+        cursor.execute('DELETE FROM working_proxies WHERE last_checked < ?', (cutoff_date,))
+        deleted = cursor.rowcount
+        self.conn.commit()
+        return deleted
 
 # تهيئة قاعدة البيانات
 db = UserDatabase()
@@ -156,6 +246,8 @@ class ProxyBotConfig:
         # تحميل الإعدادات من قاعدة البيانات
         self.bot_enabled = db.get_bot_setting('bot_enabled') == 'true'
         self.maintenance_mode = db.get_bot_setting('maintenance_mode') == 'true'
+        self.duplicate_check = db.get_bot_setting('duplicate_check') == 'true'
+        self.max_workers = int(db.get_bot_setting('max_workers') or 20)
         
         # إعدادات الفحص
         self.filter_settings = {
@@ -163,12 +255,21 @@ class ProxyBotConfig:
             'protocol': 'all',
             'timeout': 10,
             'check_working': True,
-            'max_workers': 15
+            'max_workers': self.max_workers
+        }
+        
+        # إعدادات السرعة
+        self.speed_settings = {
+            'very_slow': {'workers': 5, 'timeout': 30, 'delay': 2},
+            'slow': {'workers': 10, 'timeout': 20, 'delay': 1},
+            'normal': {'workers': 15, 'timeout': 15, 'delay': 0.5},
+            'fast': {'workers': 25, 'timeout': 10, 'delay': 0.2},
+            'very_fast': {'workers': 40, 'timeout': 8, 'delay': 0.1}
         }
 
 config = ProxyBotConfig()
 
-# 🎯 قاعدة بيانات المصادر المتقدمة
+# 🎯 قاعدة بيانات المصادر المتقدمة الموسعة
 PROXY_SOURCES = {
     "premium_apis": {
         "name": "🌟 واجهات برمجة",
@@ -178,7 +279,8 @@ PROXY_SOURCES = {
             "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
             "https://api.proxyscrape.com/v2/?request=getproxies&protocol=https&timeout=10000&country=all&ssl=all&anonymity=all",
             "https://www.proxy-list.download/api/v1/get?type=http",
-            "https://www.proxy-list.download/api/v1/get?type=https"
+            "https://www.proxy-list.download/api/v1/get?type=https",
+            "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc"
         ]
     },
     "raw_sources": {
@@ -188,19 +290,39 @@ PROXY_SOURCES = {
         "sites": [
             "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt",
             "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-            "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt"
+            "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt",
+            "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
+            "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt",
+            "https://raw.githubusercontent.com/mertguvencli/http-proxy-list/main/proxy-list/data.txt",
+            "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
+            "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt"
+        ]
+    },
+    "socks_sources": {
+        "name": "🧦 مصادر SOCKS",
+        "enabled": True,
+        "type": "text",
+        "sites": [
+            "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks4.txt",
+            "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt",
+            "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
+            "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks4.txt",
+            "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt"
         ]
     }
 }
 
-# 🎯 قوائم User-Agent
+# 🎯 قوائم User-Agent الموسعة
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0'
 ]
 
-# 🌐 مواقع فحص البروكسيات
+# 🌐 مواقع فحص البروكسيات الموسعة
 TEST_SITES = [
     "https://httpbin.org/ip",
     "https://api.ipify.org?format=json",
@@ -209,7 +331,9 @@ TEST_SITES = [
     "https://api.myip.com",
     "https://ipapi.co/json",
     "https://www.ipify.org",
-    "https://seeip.org"
+    "https://seeip.org",
+    "https://checkip.amazonaws.com",
+    "https://icanhazip.com"
 ]
 
 # 🌐 Routes لـ Render.com
@@ -217,11 +341,12 @@ TEST_SITES = [
 def home():
     bot_status = "✅ نشط" if config.bot_enabled else "⛔ متوقف"
     maintenance_status = "🔧 في الصيانة" if config.maintenance_mode else "⚡ جاهز"
+    working_proxies_count = db.get_working_proxies_count()
     
     return f"""
     <html>
         <head>
-            <title>ℙℛᎾXᎽ ℙℳᎾ 𖠛</title>
+            <title>⚡ ℙℛᎾXᎽ ℙℳᎾ 𖠛 - الأقوى على الإطلاق</title>
             <style>
                 body {{ 
                     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -229,6 +354,7 @@ def home():
                     padding: 0;
                     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                     color: white;
+                    min-height: 100vh;
                 }}
                 .container {{
                     max-width: 1200px;
@@ -238,6 +364,11 @@ def home():
                 .header {{
                     text-align: center;
                     margin-bottom: 50px;
+                    background: rgba(255, 255, 255, 0.1);
+                    backdrop-filter: blur(10px);
+                    padding: 30px;
+                    border-radius: 20px;
+                    border: 1px solid rgba(255, 255, 255, 0.2);
                 }}
                 .status-cards {{
                     display: grid;
@@ -251,30 +382,64 @@ def home():
                     padding: 25px;
                     border-radius: 15px;
                     border: 1px solid rgba(255, 255, 255, 0.2);
+                    transition: transform 0.3s ease;
+                }}
+                .card:hover {{
+                    transform: translateY(-5px);
                 }}
                 .stats {{
                     font-size: 2.5em;
                     font-weight: bold;
                     margin: 10px 0;
+                    color: #ffd700;
                 }}
                 .btn {{
                     display: inline-block;
-                    background: #007bff;
+                    background: linear-gradient(45deg, #007bff, #0056b3);
                     color: white;
-                    padding: 10px 20px;
+                    padding: 12px 25px;
                     text-decoration: none;
-                    border-radius: 5px;
-                    margin: 5px;
+                    border-radius: 8px;
+                    margin: 8px;
+                    font-weight: bold;
+                    transition: all 0.3s ease;
+                    box-shadow: 0 4px 15px rgba(0, 123, 255, 0.3);
+                }}
+                .btn:hover {{
+                    transform: translateY(-2px);
+                    box-shadow: 0 6px 20px rgba(0, 123, 255, 0.4);
+                    color: white;
+                }}
+                .premium {{
+                    background: linear-gradient(45deg, #ff6b6b, #ee5a24);
+                }}
+                .owner {{
+                    background: linear-gradient(45deg, #ffd700, #ffa500);
+                    color: #333;
                 }}
             </style>
         </head>
         <body>
             <div class="container">
                 <div class="header">
-                    <h1>ℙℛᎾXᎽ ℙℳᎾ 𖠛</h1>
-                    <p>أقوى بوت سحب وفحص بروكسيات</p>
-                    <p>👑 المالك: {BOT_OWNER} | 📞 الدعم: {SUPPORT_USER}</p>
-                    <p>الحالة: {bot_status} | {maintenance_status}</p>
+                    <h1 style="font-size: 3em; margin-bottom: 10px;">⚡ ℙℛᎾXᎽ ℙℳᎾ 𖠛</h1>
+                    <p style="font-size: 1.3em; opacity: 0.9;">أقوى وأسرع بوت سحب وفحص بروكسيات على الإطلاق</p>
+                    <div style="display: flex; justify-content: center; gap: 20px; margin-top: 20px;">
+                        <div style="background: rgba(255, 215, 0, 0.2); padding: 10px 20px; border-radius: 10px;">
+                            👑 المالك: {BOT_OWNER}
+                        </div>
+                        <div style="background: rgba(0, 123, 255, 0.2); padding: 10px 20px; border-radius: 10px;">
+                            📞 الدعم: {SUPPORT_USER}
+                        </div>
+                    </div>
+                    <div style="margin-top: 20px;">
+                        <span style="background: {'#28a745' if config.bot_enabled else '#dc3545'}; padding: 8px 16px; border-radius: 20px;">
+                            الحالة: {bot_status}
+                        </span>
+                        <span style="background: {'#ffc107' if config.maintenance_mode else '#17a2b8'}; padding: 8px 16px; border-radius: 20px; margin-left: 10px;">
+                            {maintenance_status}
+                        </span>
+                    </div>
                 </div>
                 
                 <div class="status-cards">
@@ -284,7 +449,7 @@ def home():
                     </div>
                     <div class="card">
                         <h3>✅ البروكسيات الشغالة</h3>
-                        <div class="stats">{config.session_stats['working_proxies_found']}</div>
+                        <div class="stats">{working_proxies_count}</div>
                     </div>
                     <div class="card">
                         <h3>👥 المستخدمين</h3>
@@ -292,10 +457,11 @@ def home():
                     </div>
                 </div>
                 
-                <div style="text-align: center; margin-top: 30px;">
-                    <a href="/test-proxy" class="btn">🧪 فحص بروكسي</a>
-                    <a href="/health" class="btn">📊 حالة البوت</a>
-                    <a href="https://t.me/{BOT_OWNER}" class="btn">👑 تواصل مع المالك</a>
+                <div style="text-align: center; margin-top: 40px;">
+                    <a href="/test-proxy" class="btn">🧪 فحص بروكسي يدوي</a>
+                    <a href="/health" class="btn">📊 حالة البوت المتقدمة</a>
+                    <a href="/proxies-list" class="btn premium">📁 البروكسيات الشغالة</a>
+                    <a href="https://t.me/{BOT_OWNER.replace('@', '')}" class="btn owner">👑 تواصل مع المالك</a>
                 </div>
             </div>
         </body>
@@ -304,6 +470,7 @@ def home():
 
 @app.route('/health')
 def health_check():
+    working_proxies_count = db.get_working_proxies_count()
     return jsonify({
         'status': 'healthy',
         'bot_enabled': config.bot_enabled,
@@ -311,9 +478,73 @@ def health_check():
         'timestamp': ti.time(),
         'uptime': ti.time() - config.session_stats['start_time'],
         'stats': config.session_stats,
+        'working_proxies': working_proxies_count,
         'owner': BOT_OWNER,
         'support': SUPPORT_USER
     })
+
+@app.route('/proxies-list')
+def proxies_list():
+    http_proxies = db.get_proxies_by_type('HTTP')
+    https_proxies = db.get_proxies_by_type('HTTPS')
+    socks4_proxies = db.get_proxies_by_type('SOCKS4')
+    socks5_proxies = db.get_proxies_by_type('SOCKS5')
+    
+    return f"""
+    <html>
+        <head>
+            <title>📁 البروكسيات الشغالة</title>
+            <style>
+                body {{ font-family: Arial; margin: 20px; background: #f5f5f5; }}
+                .container {{ max-width: 1000px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; }}
+                .proxy-type {{ margin-bottom: 20px; }}
+                .proxy-list {{ background: #f8f9fa; padding: 10px; border-radius: 5px; max-height: 200px; overflow-y: auto; }}
+                h2 {{ color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>📁 البروكسيات الشغالة المخزنة</h1>
+                
+                <div class="proxy-type">
+                    <h2>🌐 HTTP ({len(http_proxies)})</h2>
+                    <div class="proxy-list">
+                        {''.join([f'<div>{proxy}</div>' for proxy in http_proxies[:50]])}
+                        {f'<div>... و {len(http_proxies) - 50} أكثر</div>' if len(http_proxies) > 50 else ''}
+                    </div>
+                </div>
+                
+                <div class="proxy-type">
+                    <h2>🔒 HTTPS ({len(https_proxies)})</h2>
+                    <div class="proxy-list">
+                        {''.join([f'<div>{proxy}</div>' for proxy in https_proxies[:50]])}
+                        {f'<div>... و {len(https_proxies) - 50} أكثر</div>' if len(https_proxies) > 50 else ''}
+                    </div>
+                </div>
+                
+                <div class="proxy-type">
+                    <h2>🧦 SOCKS4 ({len(socks4_proxies)})</h2>
+                    <div class="proxy-list">
+                        {''.join([f'<div>{proxy}</div>' for proxy in socks4_proxies[:50]])}
+                        {f'<div>... و {len(socks4_proxies) - 50} أكثر</div>' if len(socks4_proxies) > 50 else ''}
+                    </div>
+                </div>
+                
+                <div class="proxy-type">
+                    <h2>🧦 SOCKS5 ({len(socks5_proxies)})</h2>
+                    <div class="proxy-list">
+                        {''.join([f'<div>{proxy}</div>' for proxy in socks5_proxies[:50]])}
+                        {f'<div>... و {len(socks5_proxies) - 50} أكثر</div>' if len(socks5_proxies) > 50 else ''}
+                    </div>
+                </div>
+                
+                <div style="text-align: center; margin-top: 20px;">
+                    <a href="/" class="btn" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">العودة للرئيسية</a>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -338,10 +569,17 @@ def test_proxy_web():
                 result = advanced_proxy_check(proxy)
                 return f"""
                 <html>
-                <head><title>نتيجة الفحص</title></head>
-                <body style="font-family: Arial; padding: 20px;">
+                <head>
+                    <title>نتيجة الفحص</title>
+                    <style>
+                        body {{ font-family: Arial; padding: 20px; background: #f5f5f5; }}
+                        .result {{ background: {'#d4edda' if result['working'] else '#f8d7da'}; padding: 20px; border-radius: 10px; }}
+                        .btn {{ background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; }}
+                    </style>
+                </head>
+                <body>
                     <h2>🧪 نتيجة فحص البروكسي</h2>
-                    <div style="background: {'#d4edda' if result['working'] else '#f8d7da'}; padding: 20px; border-radius: 10px;">
+                    <div class="result">
                         <h3>{'✅ البروكسي شغال' if result['working'] else '❌ البروكسي لا يعمل'}</h3>
                         <p><strong>البروكسي:</strong> {proxy}</p>
                         {f"<p><strong>IP الجديد:</strong> {result['ip']}</p>" if result['working'] else ""}
@@ -350,7 +588,7 @@ def test_proxy_web():
                         {f"<p><strong>الدولة:</strong> {result['country']}</p>" if result['working'] else ""}
                     </div>
                     <br>
-                    <a href="/test-proxy" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">فحص بروكسي آخر</a>
+                    <a href="/test-proxy" class="btn">فحص بروكسي آخر</a>
                 </body>
                 </html>
                 """
@@ -363,16 +601,17 @@ def test_proxy_web():
         <title>فحص البروكسيات</title>
         <style>
             body { font-family: Arial; margin: 40px; background: #f5f5f5; }
-            .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; }
-            input, button { padding: 10px; margin: 5px; width: 100%; box-sizing: border-box; }
-            button { background: #007bff; color: white; border: none; cursor: pointer; }
+            .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            input, button { padding: 12px; margin: 10px 0; width: 100%; box-sizing: border-box; }
+            button { background: #007bff; color: white; border: none; cursor: pointer; border-radius: 5px; font-size: 16px; }
+            input { border: 1px solid #ddd; border-radius: 5px; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>🧪 فحص البروكسيات يدوياً</h1>
+            <h1 style="text-align: center; color: #333;">🧪 فحص البروكسيات يدوياً</h1>
             <form method="POST">
-                <input type="text" name="proxy" placeholder="أدخل البروكسي (مثال: 194.35.125.100:8080)" required>
+                <input type="text" name="proxy" placeholder="أدخل البروكسي (مثال: 194.35.125.100:8080 أو https://194.35.125.100:8080)" required>
                 <button type="submit">فحص البروكسي</button>
             </form>
         </div>
@@ -380,13 +619,16 @@ def test_proxy_web():
     </html>
     '''
 
-# 🛠️ أدوات مساعدة
+# 🛠️ أدوات مساعدة محسنة
 def get_rotating_session():
     session = rq.Session()
     session.trust_env = False
     session.headers.update({
         'User-Agent': random.choice(USER_AGENTS),
-        'Accept': '*/*'
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
     })
     session.verify = True
     return session
@@ -399,19 +641,32 @@ def safe_request(url, timeout=15):
     except:
         return None
 
-# 🎯 نظام الفحص المتقدم
+# 🎯 نظام الفحص المتقدم المحسن
 def advanced_proxy_check(proxy):
     try:
-        proxy_dict = {'http': proxy, 'https': proxy}
+        # تحديد نوع البروكسي
+        if proxy.startswith('https://'):
+            proxy_dict = {'https': proxy}
+            proxy_type = "HTTPS"
+        elif proxy.startswith('socks4://'):
+            proxy_dict = {'http': proxy, 'https': proxy}
+            proxy_type = "SOCKS4"
+        elif proxy.startswith('socks5://'):
+            proxy_dict = {'http': proxy, 'https': proxy}
+            proxy_type = "SOCKS5"
+        else:
+            proxy_dict = {'http': proxy, 'https': proxy}
+            proxy_type = "HTTP"
+        
         original_ip = get_original_ip()
         
         test_results = []
         start_time = ti.time()
         
-        for test_url in TEST_SITES[:4]:  # اختبار 4 مواقع فقط للسرعة
+        for test_url in TEST_SITES[:6]:  # اختبار 6 مواقع للدقة
             try:
                 test_start = ti.time()
-                response = rq.get(test_url, proxies=proxy_dict, timeout=8)
+                response = rq.get(test_url, proxies=proxy_dict, timeout=8, verify=False)
                 test_time = ti.time() - test_start
                 
                 if response.status_code == 200:
@@ -426,11 +681,6 @@ def advanced_proxy_check(proxy):
         if successful_tests:
             speeds = [r['speed'] for r in successful_tests]
             avg_speed = sum(speeds) / len(speeds)
-            
-            proxy_type = "HTTP"
-            if proxy.startswith('https://'): proxy_type = "HTTPS"
-            elif proxy.startswith('socks4://'): proxy_type = "SOCKS4"
-            elif proxy.startswith('socks5://'): proxy_type = "SOCKS5"
             
             country, country_code = get_country_from_ip(successful_tests[0]['ip'])
             
@@ -473,7 +723,7 @@ def get_country_from_ip(ip):
         pass
     return 'Unknown', 'Unknown'
 
-# 🎯 نظام إدارة المستخدمين
+# 🎯 نظام إدارة المستخدمين المحسن
 def register_user(user_id, username, first_name, last_name):
     db.add_user(user_id, username, first_name, last_name)
     config.session_stats['total_users'] += 1
@@ -492,9 +742,15 @@ def can_user_use_bot(user_id):
     if user and user[8]:  # is_banned
         return False, "تم حظرك من استخدام البوت"
     
+    # التحقق من حد الطلبات اليومي للمستخدمين العاديين
+    if user and user[5] == 'free':  # membership_type
+        today = datetime.now().date().isoformat()
+        if user[7] == today and user[6] >= 10:  # last_request_date و requests_today
+            return False, "لقد استخدمت جميع طلباتك اليومية (10 طلبات)"
+    
     return True, "مسموح"
 
-# 🎯 نظام السحب الذكي
+# 🎯 نظام السحب الذكي المحسن
 def smart_pull_proxies(chat_id, user_id):
     status, message = can_user_use_bot(user_id)
     if not status:
@@ -502,537 +758,727 @@ def smart_pull_proxies(chat_id, user_id):
         return []
     
     db.update_user_request(user_id)
-    b.send_message(chat_id, "🚀 بدء السحب الذكي للبروكسيات...")
+    
+    # الحصول على إعدادات المستخدم
+    user = db.get_user(user_id)
+    check_speed = user[13] if user and len(user) > 13 else 'normal'  # check_speed
+    
+    msg = b.send_message(chat_id, "🚀 بدء السحب الذكي المتقدم للبروكسيات...")
     
     all_proxies = []
     
+    # سحب من المصادر الأساسية
     for source_id, source_info in PROXY_SOURCES.items():
         if source_info['enabled']:
-            b.send_message(chat_id, f"🔍 يبحث في: {source_info['name']}")
+            b.edit_message_text(f"🔍 يبحث في: {source_info['name']}", chat_id, msg.message_id)
             
             for site_url in source_info['sites']:
                 try:
-                    response = safe_request(site_url, timeout=20)
+                    response = safe_request(site_url, timeout=25)
                     if response:
                         proxies = extract_proxies_from_text(response.text)
                         if proxies:
                             all_proxies.extend(proxies)
-                            b.send_message(chat_id, f"✅ تم سحب {len(proxies)} بروكسي")
-                    ti.sleep(1)
+                            b.edit_message_text(f"✅ {source_info['name']}: تم سحب {len(proxies)} بروكسي", chat_id, msg.message_id)
+                    ti.sleep(0.5)
                 except Exception as e:
                     continue
     
-    unique_proxies = list(set(all_proxies))
-    config.session_stats['total_proxies_found'] += len(unique_proxies)
-    
-    if unique_proxies:
-        save_proxies_to_file(unique_proxies, "pulled_proxies.txt")
-        b.send_message(chat_id, f"📊 تم سحب {len(unique_proxies)} بروكسي بنجاح!")
+    # سحب من المصادر المخصصة للمستخدم
+    custom_sources = db.get_custom_sources(user_id)
+    if custom_sources:
+        b.edit_message_text(f"🔍 يبحث في المصادر المخصصة ({len(custom_sources)})", chat_id, msg.message_id)
         
-        with open("pulled_proxies.txt", "rb") as f:
-            b.send_document(chat_id, f, caption=f"📁 البروكسيات المسحوبة ({len(unique_proxies)})")
-        
-        # عرض أزرار الفحص
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton("✅ فحص متقدم", callback_data="advanced_check"),
-            types.InlineKeyboardButton("🔍 فحص سريع", callback_data="quick_check")
-        )
-        b.send_message(chat_id, "اختر نوع الفحص:", reply_markup=markup)
+        for source in custom_sources:
+            try:
+                response = safe_request(source[3], timeout=25)
+                if response:
+                    proxies = extract_proxies_from_text(response.text)
+                    if proxies:
+                        all_proxies.extend(proxies)
+                        b.edit_message_text(f"✅ {source[2]}: تم سحب {len(proxies)} بروكسي", chat_id, msg.message_id)
+                ti.sleep(0.5)
+            except:
+                continue
     
-    return unique_proxies
+    # إزالة التكرارات
+    all_proxies = list(set(all_proxies))
+    config.session_stats['total_proxies_found'] += len(all_proxies)
+    
+    if all_proxies:
+        b.edit_message_text(f"📥 تم سحب {len(all_proxies)} بروكسي بنجاح!\n⚡ جاري الفحص المتقدم...", chat_id, msg.message_id)
+        
+        # الفحص حسب سرعة المستخدم المختارة
+        working_proxies = advanced_check_proxies(all_proxies, chat_id, msg.message_id, check_speed)
+        
+        # حفظ البروكسيات الشغالة في قاعدة البيانات
+        for proxy_data in working_proxies:
+            db.add_working_proxy(
+                proxy_data['proxy'], proxy_data['type'], 
+                proxy_data['country'], proxy_data['speed'], 
+                user_id, "smart_pull"
+            )
+        
+        return working_proxies
+    else:
+        b.edit_message_text("❌ لم يتم العثور على أي بروكسيات من المصادر المتاحة", chat_id, msg.message_id)
+        return []
 
 def extract_proxies_from_text(text):
-    patterns = [
-        r'[a-zA-Z0-9_\-]+:[a-zA-Z0-9_\-@]+@(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d{2,5}',
-        r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}:\d{2,5}\b',
-        r'http://[^\s<>"\']+',
-        r'https://[^\s<>"\']+', 
-        r'socks4://[^\s<>"\']+',
-        r'socks5://[^\s<>"\']+',
+    proxy_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b'
+    return re.findall(proxy_pattern, text)
+
+# 🎯 نظام الفحص المتقدم المحسن
+def advanced_check_proxies(proxies, chat_id, message_id, speed='normal'):
+    speed_config = config.speed_settings.get(speed, config.speed_settings['normal'])
+    max_workers = speed_config['workers']
+    timeout = speed_config['timeout']
+    delay = speed_config['delay']
+    
+    working_proxies = []
+    checked_count = 0
+    total_proxies = len(proxies)
+    
+    def check_single_proxy(proxy):
+        nonlocal checked_count
+        result = advanced_proxy_check(proxy)
+        checked_count += 1
+        
+        if result['working']:
+            working_proxies.append(result)
+        
+        # تحديث التقدم كل 10 بروكسيات
+        if checked_count % 10 == 0:
+            progress = (checked_count / total_proxies) * 100
+            try:
+                b.edit_message_text(
+                    f"🔍 فحص البروكسيات...\n"
+                    f"📊 التقدم: {progress:.1f}%\n"
+                    f"✅ الشغالة: {len(working_proxies)}\n"
+                    f"🔍 تم فحص: {checked_count}/{total_proxies}\n"
+                    f"⚡ السرعة: {speed.replace('_', ' ').title()}",
+                    chat_id, message_id
+                )
+            except:
+                pass
+        
+        ti.sleep(delay)
+        return result
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(check_single_proxy, proxy) for proxy in proxies]
+        
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                pass
+    
+    config.session_stats['total_proxies_checked'] += total_proxies
+    config.session_stats['working_proxies_found'] += len(working_proxies)
+    
+    return working_proxies
+
+# 🎯 نظام الواجهات المحسن
+def create_main_menu(user_id):
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    
+    # الحصول على معلومات المستخدم
+    user = db.get_user(user_id)
+    membership = "👑 مميز" if user and user[9] else "🆓 عادي"  # is_premium
+    
+    # الأزرار الأساسية
+    btn1 = types.KeyboardButton('🚀 سحب وفحص بروكسيات')
+    btn2 = types.KeyboardButton('📁 البروكسيات الشغالة')
+    btn3 = types.KeyboardButton('⚙️ الإعدادات المتقدمة')
+    btn4 = types.KeyboardButton('👑 العضوية والمميزات')
+    
+    # الأزرار الإضافية للمستخدمين المميزين والمسؤولين
+    if user_id == ADMIN_ID:
+        btn5 = types.KeyboardButton('👨‍💼 لوحة التحكم')
+        markup.add(btn1, btn2, btn3, btn4, btn5)
+    elif user and user[9]:  # is_premium
+        btn5 = types.KeyboardButton('🌟 المميزات')
+        markup.add(btn1, btn2, btn3, btn4, btn5)
+    else:
+        markup.add(btn1, btn2, btn3, btn4)
+    
+    return markup
+
+def create_settings_menu(user_id):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    user = db.get_user(user_id)
+    current_speed = user[13] if user and len(user) > 13 else 'normal'  # check_speed
+    current_max = user[12] if user and len(user) > 12 else 50  # max_proxies_per_check
+    auto_cleanup = user[14] if user and len(user) > 14 else 1  # auto_cleanup
+    
+    speed_btn = types.InlineKeyboardButton(f'⚡ السرعة: {current_speed.replace("_", " ").title()}', callback_data='speed_settings')
+    max_btn = types.InlineKeyboardButton(f'📊 العدد: {current_max}', callback_data='max_settings')
+    cleanup_btn = types.InlineKeyboardButton(f'🧹 التنظيف: {"✅" if auto_cleanup else "❌"}', callback_data='toggle_cleanup')
+    sources_btn = types.InlineKeyboardButton('🔗 المصادر المخصصة', callback_data='custom_sources')
+    back_btn = types.InlineKeyboardButton('🔙 رجوع', callback_data='main_menu')
+    
+    markup.add(speed_btn, max_btn, cleanup_btn, sources_btn, back_btn)
+    return markup
+
+def create_speed_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    speeds = [
+        ('🐌 بطيء جداً', 'very_slow'),
+        ('🐢 بطيء', 'slow'),
+        ('⚡ عادي', 'normal'),
+        ('🚀 سريع', 'fast'),
+        ('🔥 سريع جداً', 'very_fast')
     ]
     
-    proxies = []
-    for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        proxies.extend(matches)
+    buttons = []
+    for name, value in speeds:
+        buttons.append(types.InlineKeyboardButton(name, callback_data=f'set_speed_{value}'))
     
-    return list(set(proxies))
+    markup.add(*buttons)
+    markup.add(types.InlineKeyboardButton('🔙 رجوع', callback_data='settings_menu'))
+    return markup
 
-def save_proxies_to_file(proxies, filename):
-    try:
-        with open(filename, "w", encoding="utf-8") as f:
-            for proxy in proxies:
-                f.write(f"{proxy}\n")
-        return True
-    except:
-        return False
+def create_admin_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    btn1 = types.InlineKeyboardButton('📊 إحصائيات البوت', callback_data='bot_stats')
+    btn2 = types.InlineKeyboardButton('👥 إدارة المستخدمين', callback_data='manage_users')
+    btn3 = types.InlineKeyboardButton('⚙️ إعدادات البوت', callback_data='bot_settings')
+    btn4 = types.InlineKeyboardButton('🔧 الصيانة', callback_data='maintenance')
+    btn5 = types.InlineKeyboardButton('🧹 تنظيف النظام', callback_data='cleanup_system')
+    btn6 = types.InlineKeyboardButton('📤 تصدير البيانات', callback_data='export_data')
+    
+    markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
+    return markup
 
-# 🎯 نظام الفحص المتقدم
-def advanced_mass_check(proxies_list, chat_id, user_id):
-    status, message = can_user_use_bot(user_id)
-    if not status:
-        b.send_message(chat_id, f"⛔ {message}")
-        return [], 0
+def create_membership_menu(user_id):
+    markup = types.InlineKeyboardMarkup(row_width=2)
     
-    db.update_user_request(user_id)
-    b.send_message(chat_id, f"🔬 بدء الفحص المتقدم لـ {len(proxies_list)} بروكسي...")
+    user = db.get_user(user_id)
+    points = user[10] if user and len(user) > 10 else 0  # points
+    is_premium = user[9] if user and len(user) > 9 else 0  # is_premium
     
-    start_time = ti.time()
-    working_proxies = []
+    btn1 = types.InlineKeyboardButton(f'🎯 نقاطي: {points}', callback_data='my_points')
+    btn2 = types.InlineKeyboardButton('🆓 ترقية عضوية', callback_data='upgrade_membership')
+    btn3 = types.InlineKeyboardButton('🎁 المميزات', callback_data='premium_features')
+    btn4 = types.InlineKeyboardButton('💎 شراء نقاط', callback_data='buy_points')
     
-    with ThreadPoolExecutor(max_workers=config.filter_settings['max_workers']) as executor:
-        future_to_proxy = {executor.submit(advanced_proxy_check, proxy): proxy for proxy in proxies_list}
-        
-        completed = 0
-        for future in as_completed(future_to_proxy):
-            try:
-                result = future.result()
-                if result['working']:
-                    working_proxies.append(result)
-                    config.session_stats['working_proxies_found'] += 1
-                
-                completed += 1
-                
-                if completed % 10 == 0:
-                    elapsed = ti.time() - start_time
-                    progress_text = f"📊 تم فحص {completed}/{len(proxies_list)} | ⚡ الشغالة: {len(working_proxies)}"
-                    b.send_message(chat_id, progress_text)
-                    
-            except Exception as e:
-                completed += 1
+    if user_id == ADMIN_ID:
+        btn5 = types.InlineKeyboardButton('👑 إدارة النقاط', callback_data='manage_points')
+        markup.add(btn1, btn2, btn3, btn4, btn5)
+    else:
+        markup.add(btn1, btn2, btn3, btn4)
     
-    elapsed_time = ti.time() - start_time
-    config.session_stats['total_proxies_checked'] += len(proxies_list)
-    
-    return working_proxies, elapsed_time
+    return markup
 
-# 📊 دوال التقارير
-def generate_detailed_report(proxies_list, elapsed_time, user_id):
-    if not proxies_list:
-        return "❌ لا توجد بروكسيات شغالة"
+# 🎯 نظام الدعم الفخم
+def create_support_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
     
-    user_type = "👑 مسؤول" if user_id == ADMIN_ID else "👤 مستخدم"
+    btn1 = types.InlineKeyboardButton('📞 تواصل مع الدعم', url=f'https://t.me/{SUPPORT_USER.replace("@", "")}')
+    btn2 = types.InlineKeyboardButton('👑 تواصل مع المالك', url=f'https://t.me/{BOT_OWNER.replace("@", "")}')
+    btn3 = types.InlineKeyboardButton('🌐 موقع البوت', url=RENDER_URL if RENDER_URL else 'https://t.me/')
+    btn4 = types.InlineKeyboardButton('📚 الدليل والمساعدة', callback_data='help_guide')
     
-    by_type = {}
-    by_country = {}
-    
-    for proxy in proxies_list:
-        proxy_type = proxy.get('type', 'Unknown')
-        by_type[proxy_type] = by_type.get(proxy_type, 0) + 1
-        country = proxy.get('country', 'Unknown')
-        by_country[country] = by_country.get(country, 0) + 1
-    
-    fast_proxies = sorted(proxies_list, key=lambda x: x['speed'])[:5]
-    
-    report = f"""
-📊 **تقرير البروكسيات الشغالة**
+    markup.add(btn1, btn2, btn3, btn4)
+    return markup
 
-✅ الإجمالي: {len(proxies_list)} بروكسي
-⏱ وقت الفحص: {elapsed_time:.2f} ثانية
-👤 نوع المستخدم: {user_type}
-
-🔧 **التوزيع حسب النوع:**
-"""
-    
-    for ptype, count in by_type.items():
-        report += f"• {ptype}: {count}\n"
-    
-    report += f"\n🌍 **الدول:**\n"
-    for country, count in sorted(by_country.items(), key=lambda x: x[1], reverse=True)[:5]:
-        report += f"• {country}: {count}\n"
-    
-    report += f"\n🏆 **أفضل البروكسيات:**\n"
-    for i, proxy in enumerate(fast_proxies, 1):
-        report += f"{i}. `{proxy['proxy']}`\n"
-        report += f"   ⚡ {proxy['speed']}s | 🌍 {proxy['country']}\n\n"
-
-    report += f"\n👑 **المالك:** {BOT_OWNER}"
-    
-    return report
-
-# 🤖 Handlers للبوت - محدثة تماماً
+# 🎯 معالجات الأوامر المحسنة
 @b.message_handler(commands=['start'])
-def send_welcome(message):
+def start_command(message):
     user_id = message.from_user.id
-    username = message.from_user.username or "بدون يوزر"
-    first_name = message.from_user.first_name or "بدون اسم"
-    last_name = message.from_user.last_name or ""
+    username = message.from_user.username
+    first_name = message.from_user.first_name
+    last_name = message.from_user.last_name
     
     register_user(user_id, username, first_name, last_name)
     
-    if user_id == ADMIN_ID:
-        # واجهة المسؤول المتكاملة
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
-        buttons = [
-            "🚀 سحب بروكسيات", "🔍 فحص متقدم", "📁 فحص من ملف",
-            "👑 لوحة التحكم", "📊 إحصائيات البوت", "👥 إدارة المستخدمين",
-            "⚡ تشغيل البوت", "⛔ إيقاف البوت", "🔧 وضع الصيانة",
-            "🌐 واجهات الويب", "🆘 المساعدة", "🔄 تحديث البوت"
-        ]
-        markup.add(*buttons)
-        
-        welcome_text = f"""
-**👑 أهلاً بك يا {BOT_OWNER}**
+    welcome_text = f"""
+    ⚡ **مرحباً بك في أقوى بوت بروكسيات على التليجرام!** ⚡
 
-🎯 **ℙℛᎾXᎽ ℙℳᎾ 𖠛 - البوت المتكامل**
+    👑 **المالك:** {BOT_OWNER}
+    📞 **الدعم:** {SUPPORT_USER}
 
-✅ **الحالة:** {'🟢 نشط' if config.bot_enabled else '🔴 متوقف'}
-🔧 **الصيانة:** {'⚙️ مفعل' if config.maintenance_mode else '✅ غير مفعل'}
+    🚀 **المميزات المتوفرة:**
+    • ✅ سحب بروكسيات من مصادر متعددة
+    • 🔍 فحص متقدم بدقة عالية
+    • ⚡ سرعات فحص قابلة للتخصيص
+    • 📊 إحصائيات مفصلة
+    • 👥 نظام عضوية متكامل
+    • 🎯 نقاط ومكافآت
 
-🚀 **استخدم الأزرار للتحكم الكامل في البوت:**
-• ⚡ تشغيل البوت - لتفعيل الخدمة
-• ⛔ إيقاف البوت - لإيقاف الخدمة
-• 🔧 وضع الصيانة - للصيانة
-• 👑 لوحة التحكم - للإدارة المتقدمة
-
-📞 **للتواصل:** {SUPPORT_USER}
-        """
-    else:
-        # واجهة المستخدم العادي
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-        buttons = [
-            "🚀 سحب بروكسيات", "🔍 فحص متقدم", 
-            "📁 فحص من ملف", "📊 إحصائياتي",
-            "👑 ترقية عضوية", "🆘 المساعدة"
-        ]
-        markup.add(*buttons)
-        
-        user = db.get_user(user_id)
-        requests_used = user[6] if user else 0
-        requests_left = 10 - requests_used
-        
-        welcome_text = f"""
-**أهلاً بك في ℙℛᎾXᎽ ℙℳᎾ 𖠛**
-
-🎯 **أقوى بوت سحب وفحص بروكسيات**
-
-📊 **حسابك:**
-• العضوية: 🆓 مجانية
-• الطلبات المستخدمة: {requests_used}
-• الطلبات المتبقية: {requests_left}
-
-🚀 **لبدء الاستخدام:**
-1. اضغط على \"🚀 سحب بروكسيات\"
-2. انتظر اكتمال السحب
-3. اضغط على \"🔍 فحص متقدم\"
-
-👑 **المالك:** {BOT_OWNER}
-        """
+    **اختر من القائمة أدناه:** 👇
+    """
     
-    b.send_message(message.chat.id, welcome_text, reply_markup=markup, parse_mode="Markdown")
+    b.send_message(message.chat.id, welcome_text, 
+                  reply_markup=create_main_menu(user_id),
+                  parse_mode='Markdown')
 
-@b.message_handler(commands=['toggle_bot'])
-def toggle_bot(message):
-    """تشغيل/إيقاف البوت - محدث"""
-    if message.from_user.id == ADMIN_ID:
-        config.bot_enabled = not config.bot_enabled
-        db.set_bot_setting('bot_enabled', 'true' if config.bot_enabled else 'false')
-        
-        status = "✅ **تم تشغيل البوت**" if config.bot_enabled else "⛔ **تم إيقاف البوت**"
-        b.send_message(message.chat.id, f"{status}\n\n📞 الدعم: {SUPPORT_USER}")
-        
-        # إرسال إشعار للمستخدمين إذا تم التشغيل
-        if config.bot_enabled:
-            b.send_message(message.chat.id, "🔔 تم إرسال إشعار تشغيل البوت للمستخدمين")
-    else:
-        b.send_message(message.chat.id, f"⛔ ليس لديك صلاحية هذه الأمر")
+@b.message_handler(commands=['support'])
+def support_command(message):
+    support_text = f"""
+    🛠️ **مركز الدعم الفخم** 🛠️
 
-@b.message_handler(func=lambda message: message.text == "⚡ تشغيل البوت")
-def enable_bot_button(message):
-    if message.from_user.id == ADMIN_ID:
-        if not config.bot_enabled:
-            config.bot_enabled = True
-            db.set_bot_setting('bot_enabled', 'true')
-            b.send_message(message.chat.id, "✅ **تم تشغيل البوت بنجاح**\n\nيمكن للمستخدمين الآن استخدام البوت")
-        else:
-            b.send_message(message.chat.id, "ℹ️ البوت مشغل بالفعل")
-    else:
-        b.send_message(message.chat.id, "⛔ هذه الخاصية للمسؤول فقط")
+    👑 **المطور والمالك:** {BOT_OWNER}
+    📞 **الدعم الفني:** {SUPPORT_USER}
+    🌐 **موقع البوت:** {RENDER_URL if RENDER_URL else 'قريباً'}
 
-@b.message_handler(func=lambda message: message.text == "⛔ إيقاف البوت")
-def disable_bot_button(message):
-    if message.from_user.id == ADMIN_ID:
-        if config.bot_enabled:
-            config.bot_enabled = False
-            db.set_bot_setting('bot_enabled', 'false')
-            b.send_message(message.chat.id, "⛔ **تم إيقاف البوت بنجاح**\n\nتم منع جميع المستخدمين من استخدام البوت")
-        else:
-            b.send_message(message.chat.id, "ℹ️ البوت موقف بالفعل")
-    else:
-        b.send_message(message.chat.id, "⛔ هذه الخاصية للمسؤول فقط")
+    ⭐ **مميزات البوت:**
+    • نظام سحب ذكي متقدم
+    • فحص بدقة وجودة عالية
+    • واجهة مستخدم فخمة
+    • إعدادات متقدمة قابلة للتخصيص
+    • دعم فني سريع
 
-@b.message_handler(func=lambda message: message.text == "🔧 وضع الصيانة")
-def maintenance_button(message):
-    if message.from_user.id == ADMIN_ID:
-        config.maintenance_mode = not config.maintenance_mode
-        db.set_bot_setting('maintenance_mode', 'true' if config.maintenance_mode else 'false')
-        
-        status = "🔧 **تم تفعيل وضع الصيانة**" if config.maintenance_mode else "⚡ **تم تعطيل وضع الصيانة**"
-        b.send_message(message.chat.id, f"{status}\n\n📞 الدعم: {SUPPORT_USER}")
-    else:
-        b.send_message(message.chat.id, "⛔ هذه الخاصية للمسؤول فقط")
+    📧 **للاستفسارات والشكاوى:**
+    تواصل مباشرة مع فريق الدupport
+    """
+    
+    b.send_message(message.chat.id, support_text,
+                  reply_markup=create_support_menu(),
+                  parse_mode='Markdown')
 
-@b.message_handler(func=lambda message: message.text == "👑 لوحة التحكم")
-def admin_panel(message):
-    if message.from_user.id == ADMIN_ID:
-        users = db.get_all_users()
-        total_users = len(users)
-        active_today = len([u for u in users if u[7] == datetime.now().date().isoformat()])
-        
-        admin_text = f"""
-👑 **لوحة تحكم المسؤول**
-
-📊 **إحصائيات البوت:**
-• المستخدمين: {total_users}
-• النشطين اليوم: {active_today}
-• البروكسيات المسحوبة: {config.session_stats['total_proxies_found']}
-• البروكسيات الشغالة: {config.session_stats['working_proxies_found']}
-
-⚙️ **حالة البوت:**
-• التشغيل: {'✅ نشط' if config.bot_enabled else '⛔ متوقف'}
-• الصيانة: {'🔧 مفعل' if config.maintenance_mode else '✅ غير مفعل'}
-
-🌐 **الواجهات:**
-• الموقع: {RENDER_URL}
-• فحص يدوي: {RENDER_URL}/test-proxy
-• حالة البوت: {RENDER_URL}/health
-
-📞 **الدعم:** {SUPPORT_USER}
-        """
-        
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton("🔄 تحديث الإحصائيات", callback_data="refresh_stats"),
-            types.InlineKeyboardButton("📋 قائمة المستخدمين", callback_data="users_list")
-        )
-        
-        b.send_message(message.chat.id, admin_text, reply_markup=markup, parse_mode="Markdown")
-    else:
-        b.send_message(message.chat.id, "⛔ هذه الخاصية للمسؤول فقط")
-
-@b.message_handler(func=lambda message: message.text == "🚀 سحب بروكسيات")
-def start_smart_pull(message):
-    smart_pull_proxies(message.chat.id, message.from_user.id)
-
-@b.message_handler(func=lambda message: message.text == "🔍 فحص متقدم")
-def start_advanced_check(message):
+@b.message_handler(func=lambda message: message.text == '🚀 سحب وفحص بروكسيات')
+def smart_pull_handler(message):
     user_id = message.from_user.id
+    
+    status, msg_text = can_user_use_bot(user_id)
+    if not status:
+        b.send_message(message.chat.id, f"⛔ {msg_text}")
+        return
+    
+    # عرض خيارات السحب
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    btn1 = types.InlineKeyboardButton('🌐 سحب ذكي من الإنترنت', callback_data='pull_smart')
+    btn2 = types.InlineKeyboardButton('📁 فحص ملف بروكسيات', callback_data='pull_file')
+    btn3 = types.InlineKeyboardButton('⚡ فحص سريع (محدود)', callback_data='pull_quick')
+    btn4 = types.InlineKeyboardButton('🔙 رجوع', callback_data='main_menu')
+    
+    markup.add(btn1, btn2, btn3, btn4)
+    
+    b.send_message(message.chat.id, 
+                  "🚀 **اختر طريقة سحب البروكسيات:**\n\n"
+                  "• 🌐 السحب الذكي: سحب من جميع المصادر\n"
+                  "• 📁 فحص ملف: رفع ملف بروكسيات لفحصه\n"
+                  "• ⚡ فحص سريع: فحص محدود وسريع", 
+                  reply_markup=markup,
+                  parse_mode='Markdown')
+
+@b.message_handler(func=lambda message: message.text == '📁 البروكسيات الشغالة')
+def working_proxies_handler(message):
+    user_id = message.from_user.id
+    
+    http_count = len(db.get_proxies_by_type('HTTP'))
+    https_count = len(db.get_proxies_by_type('HTTPS'))
+    socks4_count = len(db.get_proxies_by_type('SOCKS4'))
+    socks5_count = len(db.get_proxies_by_type('SOCKS5'))
+    total_count = db.get_working_proxies_count()
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    btn1 = types.InlineKeyboardButton(f'🌐 HTTP ({http_count})', callback_data='get_http')
+    btn2 = types.InlineKeyboardButton(f'🔒 HTTPS ({https_count})', callback_data='get_https')
+    btn3 = types.InlineKeyboardButton(f'🧦 SOCKS4 ({socks4_count})', callback_data='get_socks4')
+    btn4 = types.InlineKeyboardButton(f'🧦 SOCKS5 ({socks5_count})', callback_data='get_socks5')
+    btn5 = types.InlineKeyboardButton('📥 تحميل الكل', callback_data='get_all_proxies')
+    btn6 = types.InlineKeyboardButton('🔄 تحديث', callback_data='refresh_proxies')
+    
+    markup.add(btn1, btn2, btn3, btn4, btn5, btn6)
+    
+    text = f"""
+    📊 **البروكسيات الشغالة المخزنة:**
+
+    🌐 **HTTP:** `{http_count}`
+    🔒 **HTTPS:** `{https_count}`
+    🧦 **SOCKS4:** `{socks4_count}`
+    🧦 **SOCKS5:** `{socks5_count}`
+    📁 **المجموع:** `{total_count}`
+
+    ⏰ **آخر تحديث:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+    **اختر النوع الذي تريد تحميله:** 👇
+    """
+    
+    b.send_message(message.chat.id, text, 
+                  reply_markup=markup,
+                  parse_mode='Markdown')
+
+@b.message_handler(func=lambda message: message.text == '⚙️ الإعدادات المتقدمة')
+def settings_handler(message):
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    current_speed = user[13] if user and len(user) > 13 else 'normal'
+    current_max = user[12] if user and len(user) > 12 else 50
+    auto_cleanup = user[14] if user and len(user) > 14 else 1
+    
+    text = f"""
+    ⚙️ **الإعدادات المتقدمة**
+
+    ⚡ **سرعة الفحص:** `{current_speed.replace('_', ' ').title()}`
+    📊 **الحد الأقصى:** `{current_max} بروكسي`
+    🧹 **التنظيف التلقائي:** `{'مفعل' if auto_cleanup else 'معطل'}`
+
+    **اختر الإعداد الذي تريد تعديله:** 👇
+    """
+    
+    b.send_message(message.chat.id, text,
+                  reply_markup=create_settings_menu(user_id),
+                  parse_mode='Markdown')
+
+@b.message_handler(func=lambda message: message.text == '👑 العضوية والمميزات')
+def membership_handler(message):
+    user_id = message.from_user.id
+    user = db.get_user(user_id)
+    
+    points = user[10] if user and len(user) > 10 else 0
+    is_premium = user[9] if user and len(user) > 9 else 0
+    membership_type = "👑 مميز" if is_premium else "🆓 عادي"
+    
+    text = f"""
+    👑 **نظام العضوية والمميزات**
+
+    🎯 **نقاطك:** `{points}`
+    💎 **عضويتك:** `{membership_type}`
+    📅 **تاريخ الانضمام:** `{user[4] if user else 'غير معروف'}`
+
+    🚀 **مميزات العضوية المميزة:**
+    • ✅ عدد غير محدود من الطلبات
+    • ⚡ سرعات فحص أعلى
+    • 🔗 إضافة مصادر مخصصة
+    • 📊 إحصائيات متقدمة
+    • 🎯 دعم فني متميز
+
+    **اختر من الخيارات أدناه:** 👇
+    """
+    
+    b.send_message(message.chat.id, text,
+                  reply_markup=create_membership_menu(user_id),
+                  parse_mode='Markdown')
+
+@b.message_handler(func=lambda message: message.text == '👨‍💼 لوحة التحكم')
+def admin_panel_handler(message):
+    if message.from_user.id != ADMIN_ID:
+        b.send_message(message.chat.id, "⛔ ليس لديك صلاحية الوصول لهذا القسم!")
+        return
+    
+    text = """
+    👨‍💼 **لوحة تحكم المسؤول**
+
+    🛠️ **إدارة البوت بالكامل:**
+    • 📊 الإحصائيات والمتابعة
+    • 👥 إدارة المستخدمين
+    • ⚙️ إعدادات البوت المتقدمة
+    • 🔧 وضع الصيانة
+    • 🧹 تنظيف النظام
+
+    **اختر المهمة التي تريد تنفيذها:** 👇
+    """
+    
+    b.send_message(message.chat.id, text,
+                  reply_markup=create_admin_menu(),
+                  parse_mode='Markdown')
+
+# 🎯 معالجات Callback المحسنة
+@b.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+    message_id = call.message.message_id
+    
     try:
-        with open("pulled_proxies.txt", "r", encoding="utf-8") as f:
-            proxies = [line.strip() for line in f if line.strip()]
+        if call.data == 'main_menu':
+            b.edit_message_text("🏠 **القائمة الرئيسية**", chat_id, message_id,
+                              reply_markup=create_main_menu(user_id),
+                              parse_mode='Markdown')
         
-        if proxies:
-            # تحديد عدد البروكسيات للفحص
-            proxies_to_check = proxies[:50]  # حد أقصى 50 للسرعة
+        elif call.data == 'settings_menu':
+            user = db.get_user(user_id)
+            current_speed = user[13] if user and len(user) > 13 else 'normal'
+            current_max = user[12] if user and len(user) > 12 else 50
             
-            b.send_message(message.chat.id, f"🔬 بدء الفحص المتقدم لـ {len(proxies_to_check)} بروكسي...")
-            working_proxies, elapsed_time = advanced_mass_check(proxies_to_check, message.chat.id, user_id)
+            text = f"""
+            ⚙️ **الإعدادات المتقدمة**
+
+            ⚡ **سرعة الفحص:** `{current_speed.replace('_', ' ').title()}`
+            📊 **الحد الأقصى:** `{current_max} بروكسي`
+
+            **اختر الإعداد الذي تريد تعديله:** 👇
+            """
             
-            report = generate_detailed_report(working_proxies, elapsed_time, user_id)
-            b.send_message(message.chat.id, report, parse_mode="Markdown")
+            b.edit_message_text(text, chat_id, message_id,
+                              reply_markup=create_settings_menu(user_id),
+                              parse_mode='Markdown')
+        
+        elif call.data == 'speed_settings':
+            b.edit_message_text("⚡ **اختر سرعة الفحص:**\n\n"
+                              "• 🐌 بطيء جداً: دقة عالية، وقت أطول\n"
+                              "• 🐢 بطيء: دقة جيدة، وقت معقول\n"
+                              "• ⚡ عادي: توازن بين السرعة والدقة\n"
+                              "• 🚀 سريع: سرعة عالية، دقة أقل\n"
+                              "• 🔥 سريع جداً: أقصى سرعة", 
+                              chat_id, message_id,
+                              reply_markup=create_speed_menu())
+        
+        elif call.data.startswith('set_speed_'):
+            speed = call.data.replace('set_speed_', '')
+            db.update_user_setting(user_id, 'check_speed', speed)
+            
+            b.edit_message_text(f"✅ **تم تحديث سرعة الفحص إلى:** `{speed.replace('_', ' ').title()}`", 
+                              chat_id, message_id,
+                              reply_markup=create_settings_menu(user_id),
+                              parse_mode='Markdown')
+        
+        elif call.data == 'pull_smart':
+            b.edit_message_text("🚀 **بدء السحب الذكي المتقدم...**", chat_id, message_id)
+            working_proxies = smart_pull_proxies(chat_id, user_id)
             
             if working_proxies:
-                with open("working_proxies.txt", "w", encoding="utf-8") as f:
-                    for proxy_info in working_proxies:
-                        f.write(f"{proxy_info['proxy']}\n")
+                # تجميع البروكسيات حسب النوع
+                http_proxies = [p for p in working_proxies if p['type'] == 'HTTP']
+                https_proxies = [p for p in working_proxies if p['type'] == 'HTTPS']
+                socks4_proxies = [p for p in working_proxies if p['type'] == 'SOCKS4']
+                socks5_proxies = [p for p in working_proxies if p['type'] == 'SOCKS5']
                 
-                with open("working_proxies.txt", "rb") as f:
-                    b.send_document(message.chat.id, f, caption=f"📁 البروكسيات الشغالة ({len(working_proxies)})")
-        else:
-            b.send_message(message.chat.id, "❌ لا توجد بروكسيات مسحوبة. قم بالسحب أولاً.")
-    except FileNotFoundError:
-        b.send_message(message.chat.id, "❌ لا توجد بروكسيات مسحوبة. قم بالسحب أولاً.")
+                # إنشاء الملف النهائي
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"working_proxies_{timestamp}.txt"
+                
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write("# ⚡ ℙℛᎾXᎽ ℙℳᎾ 𖠛 - البروكسيات الشغالة\n")
+                    f.write(f"# 📅 التاريخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"# 👤 المستخدم: {call.from_user.first_name}\n")
+                    f.write(f"# 📊 الإجمالي: {len(working_proxies)} بروكسي\n\n")
+                    
+                    if http_proxies:
+                        f.write(f"\n# 🌐 HTTP ({len(http_proxies)})\n")
+                        for proxy in http_proxies:
+                            f.write(f"{proxy['proxy']}\n")
+                    
+                    if https_proxies:
+                        f.write(f"\n# 🔒 HTTPS ({len(https_proxies)})\n")
+                        for proxy in https_proxies:
+                            f.write(f"{proxy['proxy']}\n")
+                    
+                    if socks4_proxies:
+                        f.write(f"\n# 🧦 SOCKS4 ({len(socks4_proxies)})\n")
+                        for proxy in socks4_proxies:
+                            f.write(f"{proxy['proxy']}\n")
+                    
+                    if socks5_proxies:
+                        f.write(f"\n# 🧦 SOCKS5 ({len(socks5_proxies)})\n")
+                        for proxy in socks5_proxies:
+                            f.write(f"{proxy['proxy']}\n")
+                
+                # إرسال الملف مع الإحصائيات
+                stats_text = f"""
+    ✅ **تم الانتهاء من السحب والفحص بنجاح!**
 
-@b.message_handler(func=lambda message: message.text == "📁 فحص من ملف")
-def check_from_file(message):
-    b.send_message(message.chat.id, "📁 أرسل ملف txt يحتوي على البروكسيات (بروكسي في كل سطر)")
-    config.user_states[message.chat.id] = 'awaiting_file'
+    📊 **الإحصائيات النهائية:**
+    • 🌐 HTTP: `{len(http_proxies)}`
+    • 🔒 HTTPS: `{len(https_proxies)}`
+    • 🧦 SOCKS4: `{len(socks4_proxies)}`
+    • 🧦 SOCKS5: `{len(socks5_proxies)}`
+    • 📁 الإجمالي: `{len(working_proxies)}`
 
-@b.message_handler(func=lambda message: message.text == "📊 إحصائيات البوت")
-def bot_stats(message):
-    if message.from_user.id == ADMIN_ID:
-        uptime = ti.time() - config.session_stats['start_time']
-        hours, remainder = divmod(uptime, 3600)
-        minutes, seconds = divmod(remainder, 60)
+    ⏰ **الوقت المستغرق:** {datetime.now().strftime('%H:%M:%S')}
+    👤 **بواسطة:** {call.from_user.first_name}
+
+    📥 **الملف المرفق يحتوي على جميع البروكسيات الشغالة**
+                """
+                
+                with open(filename, 'rb') as file:
+                    b.send_document(chat_id, file, caption=stats_text, parse_mode='Markdown')
+                
+                os.remove(filename)
+                
+                # إضافة نقاط للمستخدم
+                if user_id != ADMIN_ID:
+                    points_earned = min(len(working_proxies) // 5, 20)
+                    if points_earned > 0:
+                        db.update_user_points(user_id, points_earned)
+                        b.send_message(chat_id, f"🎯 **لقد كسبت {points_earned} نقطة!**", parse_mode='Markdown')
+            else:
+                b.edit_message_text("❌ **لم يتم العثور على أي بروكسيات شغالة**", chat_id, message_id)
         
-        stats_text = f"""
-📊 **إحصائيات البوت المتقدمة**
-
-🕒 وقت التشغيل: {int(hours)}h {int(minutes)}m
-🔗 بروكسيات مسحوبة: {config.session_stats['total_proxies_found']}
-✅ بروكسيات شغالة: {config.session_stats['working_proxies_found']}
-🔍 بروكسيات مفحوصة: {config.session_stats['total_proxies_checked']}
-👥 المستخدمين: {config.session_stats['total_users']}
-
-🌐 **المصادر النشطة:**
-"""
+        elif call.data.startswith('get_'):
+            proxy_type = call.data.replace('get_', '').upper()
+            if proxy_type == 'ALL_PROXIES':
+                proxies = db.get_proxies_by_type('HTTP') + db.get_proxies_by_type('HTTPS') + \
+                         db.get_proxies_by_type('SOCKS4') + db.get_proxies_by_type('SOCKS5')
+                filename = "all_proxies.txt"
+                caption = "🌐 جميع البروكسيات الشغالة"
+            else:
+                proxies = db.get_proxies_by_type(proxy_type)
+                type_names = {'HTTP': '🌐 HTTP', 'HTTPS': '🔒 HTTPS', 'SOCKS4': '🧦 SOCKS4', 'SOCKS5': '🧦 SOCKS5'}
+                filename = f"{proxy_type.lower()}_proxies.txt"
+                caption = f"{type_names.get(proxy_type, proxy_type)} البروكسيات الشغالة"
+            
+            if proxies:
+                with open(filename, 'w') as f:
+                    f.write('\n'.join(proxies))
+                
+                with open(filename, 'rb') as file:
+                    b.send_document(chat_id, file, caption=f"📁 {caption} - {len(proxies)} بروكسي")
+                
+                os.remove(filename)
+            else:
+                b.answer_callback_query(call.id, f"❌ لا توجد بروكسيات شغالة من نوع {proxy_type}")
         
-        for source_id, source_info in PROXY_SOURCES.items():
-            if source_info['enabled']:
-                stats_text += f"• {source_info['name']}: {len(source_info['sites'])} موقع\n"
-        
-        stats_text += f"""
-⚡ **حالة البوت:** {'🟢 نشط' if config.bot_enabled else '🔴 متوقف'}
-🔧 **الصيانة:** {'🟡 مفعل' if config.maintenance_mode else '🟢 غير مفعل'}
+        elif call.data == 'bot_stats':
+            if user_id != ADMIN_ID:
+                b.answer_callback_query(call.id, "⛔ ليس لديك صلاحية الوصول!")
+                return
+            
+            total_users = len(db.get_all_users())
+            working_proxies_count = db.get_working_proxies_count()
+            uptime = ti.time() - config.session_stats['start_time']
+            
+            stats_text = f"""
+    📊 **إحصائيات البوت المتقدمة**
 
-👑 **المالك:** {BOT_OWNER}
-        """
-        
-        b.send_message(message.chat.id, stats_text, parse_mode="Markdown")
-    else:
-        user = db.get_user(message.from_user.id)
-        requests_used = user[6] if user else 0
-        requests_left = 10 - requests_used
-        
-        user_stats = f"""
-📊 **إحصائيات حسابك**
+    👥 **المستخدمين:** `{total_users}`
+    📁 **البروكسيات الشغالة:** `{working_proxies_count}`
+    ⏰ **مدة التشغيل:** `{timedelta(seconds=int(uptime))}`
+    🔍 **إجمالي المسحوب:** `{config.session_stats['total_proxies_found']}`
+    ✅ **إجمالي الشغالة:** `{config.session_stats['working_proxies_found']}`
 
-• الطلبات المستخدمة: {requests_used}
-• الطلبات المتبقية: {requests_left}
-• العضوية: 🆓 مجانية
+    ⚙️ **الإعدادات:**
+    • البوت: `{'✅ نشط' if config.bot_enabled else '⛔ متوقف'}`
+    • الصيانة: `{'🔧 مفعل' if config.maintenance_mode else '⚡ غير مفعل'}`
+    • الفحص المكرر: `{'✅ مفعل' if config.duplicate_check else '❌ معطل'}`
 
-👑 **لترقية العضوية:** تواصل مع {BOT_OWNER}
-        """
-        b.send_message(message.chat.id, user_stats, parse_mode="Markdown")
-
-@b.message_handler(func=lambda message: message.text == "🔄 تحديث البوت")
-def refresh_bot(message):
-    if message.from_user.id == ADMIN_ID:
-        b.send_message(message.chat.id, "🔄 **جاري تحديث البوت...**")
+    🗓️ **آخر تحديث:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            """
+            
+            b.edit_message_text(stats_text, chat_id, message_id, parse_mode='Markdown')
         
-        # إعادة تحميل الإعدادات من قاعدة البيانات
-        config.bot_enabled = db.get_bot_setting('bot_enabled') == 'true'
-        config.maintenance_mode = db.get_bot_setting('maintenance_mode') == 'true'
-        
-        b.send_message(message.chat.id, "✅ **تم تحديث البوت بنجاح**\n\nتم تحميل أحدث الإعدادات")
-    else:
-        b.send_message(message.chat.id, "⛔ هذه الخاصية للمسؤول فقط")
+        elif call.data == 'manage_users':
+            if user_id != ADMIN_ID:
+                b.answer_callback_query(call.id, "⛔ ليس لديك صلاحية الوصول!")
+                return
+            
+            users = db.get_all_users()
+            premium_users = [u for u in users if u[9]]  # is_premium
+            banned_users = [u for u in users if u[8]]  # is_banned
+            
+            users_text = f"""
+    👥 **إدارة المستخدمين**
 
+    📊 **الإحصائيات:**
+    • 👥 إجمالي المستخدمين: `{len(users)}`
+    • 👑 مستخدمين مميزين: `{len(premium_users)}`
+    • ⛔ محظورين: `{len(banned_users)}`
+
+    📋 **آخر 5 مستخدمين:**
+    """
+            
+            for user in users[-5:]:
+                users_text += f"\n• {user[2] or 'بدون اسم'} (ID: `{user[0]}`) - {user[5]}"
+            
+            users_text += "\n\n**استخدم /broadcast لإرسال رسالة جماعية**"
+            
+            b.edit_message_text(users_text, chat_id, message_id, parse_mode='Markdown')
+        
+        elif call.data == 'cleanup_system':
+            if user_id != ADMIN_ID:
+                b.answer_callback_query(call.id, "⛔ ليس لديك صلاحية الوصول!")
+                return
+            
+            deleted_proxies = db.cleanup_old_proxies(7)
+            b.edit_message_text(f"🧹 **تم تنظيف النظام!**\n\nتم حذف `{deleted_proxies}` بروكسي قديم", 
+                              chat_id, message_id, parse_mode='Markdown')
+    
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
+        b.answer_callback_query(call.id, "❌ حدث خطأ أثناء المعالجة")
+
+# 🎯 معالجة الملفات
 @b.message_handler(content_types=['document'])
 def handle_document(message):
-    if config.user_states.get(message.chat.id) == 'awaiting_file':
-        try:
-            file_info = b.get_file(message.document.file_id)
-            downloaded_file = b.download_file(file_info.file_path)
-            
-            # قراءة البروكسيات من الملف
-            proxies = []
-            for line in downloaded_file.decode('utf-8').split('\n'):
-                line = line.strip()
-                if line:
-                    proxies.append(line)
-            
-            b.send_message(message.chat.id, f"📥 تم تحميل {len(proxies)} بروكسي من الملف")
-            config.user_states[message.chat.id] = None
-            
-            if proxies:
-                # حفظ الملف المؤقت
-                with open("user_proxies.txt", "w", encoding="utf-8") as f:
-                    for proxy in proxies:
-                        f.write(f"{proxy}\n")
-                
-                # عرض خيارات الفحص
-                markup = types.InlineKeyboardMarkup()
-                markup.add(
-                    types.InlineKeyboardButton("✅ فحص الكل", callback_data="check_all"),
-                    types.InlineKeyboardButton("🔍 فحص 20 بروكسي", callback_data="check_20")
-                )
-                b.send_message(message.chat.id, f"اختر خيار الفحص لـ {len(proxies)} بروكسي:", reply_markup=markup)
-            
-        except Exception as e:
-            b.send_message(message.chat.id, f"❌ خطأ في تحميل الملف: {e}")
-            config.user_states[message.chat.id] = None
+    user_id = message.from_user.id
+    
+    status, msg_text = can_user_use_bot(user_id)
+    if not status:
+        b.send_message(message.chat.id, f"⛔ {msg_text}")
+        return
+    
+    try:
+        file_info = b.get_file(message.document.file_id)
+        downloaded_file = b.download_file(file_info.file_path)
+        
+        # حفظ الملف مؤقتاً
+        temp_filename = f"temp_{user_id}_{int(ti.time())}.txt"
+        with open(temp_filename, 'wb') as f:
+            f.write(downloaded_file)
+        
+        # استخراج البروكسيات من الملف
+        with open(temp_filename, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        proxies = extract_proxies_from_text(content)
+        os.remove(temp_filename)
+        
+        if not proxies:
+            b.send_message(message.chat.id, "❌ لم يتم العثور على أي بروكسيات في الملف")
+            return
+        
+        # عرض خيارات الفحص
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        
+        user = db.get_user(user_id)
+        current_speed = user[13] if user and len(user) > 13 else 'normal'
+        
+        btn1 = types.InlineKeyboardButton(f'⚡ فحص ({current_speed})', callback_data=f'check_file_{len(proxies)}')
+        btn2 = types.InlineKeyboardButton('⚙️ تغيير الإعدادات', callback_data='settings_menu')
+        btn3 = types.InlineKeyboardButton('❌ إلغاء', callback_data='main_menu')
+        
+        markup.add(btn1, btn2, btn3)
+        
+        b.send_message(message.chat.id,
+                      f"📁 **تم استخراج {len(proxies)} بروكسي من الملف**\n\n"
+                      f"⚡ **سرعة الفحص الحالية:** `{current_speed.replace('_', ' ').title()}`\n\n"
+                      f"**اختر الإجراء المناسب:** 👇",
+                      reply_markup=markup,
+                      parse_mode='Markdown')
+    
+    except Exception as e:
+        b.send_message(message.chat.id, f"❌ خطأ في معالجة الملف: {str(e)}")
 
-@b.callback_query_handler(func=lambda call: True)
-def handle_callbacks(call):
-    chat_id = call.message.chat.id
-    user_id = call.from_user.id
-    
-    if call.data == "advanced_check":
-        b.answer_callback_query(call.id, "بدء الفحص المتقدم")
-        start_advanced_check(call.message)
-    
-    elif call.data == "quick_check":
-        b.answer_callback_query(call.id, "بدء الفحص السريع")
-        # يمكن إضافة فحص سريع هنا
-    
-    elif call.data == "refresh_stats":
-        if user_id == ADMIN_ID:
-            bot_stats(call.message)
-            b.answer_callback_query(call.id, "تم تحديث الإحصائيات")
-    
-    elif call.data == "check_all":
-        try:
-            with open("user_proxies.txt", "r", encoding="utf-8") as f:
-                proxies = [line.strip() for line in f if line.strip()]
-            
-            if proxies:
-                working_proxies, elapsed_time = advanced_mass_check(proxies[:100], chat_id, user_id)  # حد 100 للسلامة
-                report = generate_detailed_report(working_proxies, elapsed_time, user_id)
-                b.send_message(chat_id, report, parse_mode="Markdown")
-                
-                if working_proxies:
-                    with open("working_proxies.txt", "w", encoding="utf-8") as f:
-                        for proxy_info in working_proxies:
-                            f.write(f"{proxy_info['proxy']}\n")
-                    
-                    with open("working_proxies.txt", "rb") as f:
-                        b.send_document(chat_id, f, caption=f"📁 النتائج ({len(working_proxies)})")
-        except Exception as e:
-            b.send_message(chat_id, f"❌ خطأ في الفحص: {e}")
-
-# 🚀 تشغيل البوت
-def setup_webhook():
-    """إعداد Webhook محسن"""
+# 🎯 تشغيل البوت
+def run_bot():
     try:
         if RENDER_URL:
-            webhook_url = f"{RENDER_URL}/webhook"
+            # على Render، استخدم Webhook
             b.remove_webhook()
             ti.sleep(1)
+            webhook_url = f"{RENDER_URL}/webhook"
             b.set_webhook(url=webhook_url)
-            logger.info(f"✅ تم تعيين Webhook: {webhook_url}")
-            return True
+            logger.info(f"Webhook set to: {webhook_url}")
+            
+            # تشغيل Flask
+            app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+        else:
+            # محلياً، استخدم Polling
+            b.remove_webhook()
+            ti.sleep(1)
+            logger.info("Starting bot in polling mode...")
+            b.polling(none_stop=True, interval=1, timeout=60)
     except Exception as e:
-        logger.error(f"❌ خطأ في Webhook: {e}")
-    return False
+        logger.error(f"Bot startup error: {e}")
+        ti.sleep(10)
+        run_bot()
 
 if __name__ == "__main__":
-    logger.info("🚀 بدء تشغيل ℙℛᎾXᎽ ℙℳᎾ 𖠛...")
-    logger.info(f"👑 المالك: {BOT_OWNER}")
+    logger.info("🚀 Starting Advanced Proxy Bot...")
+    logger.info(f"👑 Bot Owner: {BOT_OWNER}")
+    logger.info(f"📞 Support: {SUPPORT_USER}")
     
-    # التأكد من أن البوت مشغل افتراضياً
-    if db.get_bot_setting('bot_enabled') is None:
-        db.set_bot_setting('bot_enabled', 'true')
-        config.bot_enabled = True
+    # تهيئة الإحصائيات
+    config.session_stats['total_users'] = len(db.get_all_users())
     
-    # محاولة إعداد Webhook
-    webhook_setup = setup_webhook()
-    
-    if webhook_setup and RENDER_URL:
-        print(f"""
-🎉 ℙℛᎾXᎽ ℙℳᎾ 𖠛 يعمل على Render.com!
-✅ Webhook: {RENDER_URL}/webhook
-✅ الواجهة: {RENDER_URL}
-✅ فحص يدوي: {RENDER_URL}/test-proxy
-
-👑 المالك: {BOT_OWNER}
-📞 الدعم: {SUPPORT_USER}
-📊 البوت جاهز للعمل!
-        """)
-        
-        port = int(os.environ.get("PORT", 10000))
-        app.run(host='0.0.0.0', port=port, debug=False)
-        
-    else:
-        print(f"""
-🔄 استخدام Polling mode
-✅ جميع الميزات تعمل
-👑 المالك: {BOT_OWNER}
-
-💡 تعليمات التشغيل:
-1. أرسل /start لرؤية الأزرار
-2. استخدم "⚡ تشغيل البوت" لتفعيل الخدمة
-3. استخدم "🚀 سحب بروكسيات" للبدء
-        """)
-        b.infinity_polling(timeout=60, long_polling_timeout=60)
+    run_bot()
