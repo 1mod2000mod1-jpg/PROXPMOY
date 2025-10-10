@@ -478,7 +478,7 @@ def register_user(user_id, username, first_name, last_name):
     db.add_user(user_id, username, first_name, last_name)
     config.session_stats['total_users'] += 1
 
-def can_user_use_bot(user_id):6521966233
+def can_user_use_bot(user_id):
     if user_id == ADMIN_ID:
         return True, "مسؤول"
     
