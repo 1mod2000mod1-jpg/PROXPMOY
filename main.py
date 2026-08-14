@@ -33,8 +33,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # متغيرات البيئة من Render
-BOT_TOKEN = os.environ.get('BOT_TOKEN', '8216062426:AAGK7A9rbT5SJkalK_TGK9BsY7EerP-z438')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', '6521966233'))
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8047604654:AAEHdsWdFLaT2-YA6zIHu5dI6JmjYnCDNhg')
+ADMIN_ID = int(os.environ.get('ADMIN_ID', '6154678499'))
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', '')
 SUPPORT_USER = '@xtt19x'
 BOT_OWNER = '@xtt19x'
